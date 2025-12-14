@@ -31,7 +31,7 @@ Adjust `TrainConfig` in `config.py` to control tickers, IB connection details, b
 - `BAR_SIZE`, `WHAT_TO_SHOW`, `USE_RTH`: historical bar request parameters.
 - Labeling: `LABEL_HORIZON_HOURS/BARS`, `LABEL_ATR_K`, `MIN_LABEL_PCT`.
 - Objective constraints: `PROBA_SIGNAL_TH`, `MIN_SIGNALS`, `MIN_PRECISION`, `COST_BPS`.
-- Tuning: `N_TRIALS`, `N_SPLITS`, `FAST_MODE`.
+- Tuning/CV: `N_TRIALS`, `CV_N_FOLDS`, `CV_VAL_LEN_DAYS`, `CV_GAP_DAYS`, `CV_TRAIN_MIN_BARS`, `CV_MODE`, `FAST_MODE`.
 - Walk-forward: `WFO_TRAIN_MONTHS`, `WFO_VAL_MONTHS`, `WFO_STEP_MONTHS`.
 - Monitoring/retrain cadence: `RETRAIN_FREQ_DAYS`, `TRAIN_LOOKBACK_MONTHS`.
 
@@ -49,7 +49,7 @@ Historical data is fetched from IBKR and cached per ticker in `DATA_DB` using `i
 3. For each ticker, the script will:
    - Fetch and cache bars.
    - Engineer features and forward-return labels.
-   - Tune XGBoost hyperparameters with time-series CV (Optuna) unless `FAST_MODE` is enabled.
+   - Tune XGBoost hyperparameters with timestamp-based CV folds that include an embargo gap (Optuna) unless `FAST_MODE` is enabled.
    - Prune to the most important features via SHAP (fallback to gain-based ranking if SHAP is unavailable).
    - Train the final model, evaluate on a holdout split, and summarize walk-forward windows.
    - Save the model and metadata into `multi_models/` and record the run in the SQLite `model_registry` table.

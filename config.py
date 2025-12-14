@@ -31,7 +31,12 @@ class TrainConfig:
     # Tuning / CV
     FAST_MODE: bool = False
     N_TRIALS: int = 50
-    N_SPLITS: int = 6
+    CV_N_FOLDS: int = 6
+    CV_VAL_LEN_DAYS: int = 30
+    CV_GAP_DAYS: int = 3
+    CV_TRAIN_MIN_BARS: int = 1500
+    CV_MODE: str = "expanding"         # expanding (anchored) or rolling
+    CV_ROLLING_TRAIN_MONTHS: int | None = None
 
     # Trading objective constraints
     PROBA_SIGNAL_TH: float = 0.55

@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 import optuna
 from optuna.samplers import TPESampler
-from sklearn.model_selection import TimeSeriesSplit
 from xgboost import XGBClassifier
 from ib_insync import IB
 
@@ -50,6 +49,80 @@ def compute_spw_baseline(y: pd.Series) -> float:
         return 1.0
     return max(1.0, min(20.0, neg / pos))
 
+def timestamp_folds(
+    df: pd.DataFrame,
+    train_min_bars: int,
+    val_len_days: int,
+    gap_days: int,
+    n_folds: int,
+    mode: str = "expanding",
+    rolling_train_months: int | None = None,
+):
+    """Generate timestamp-based CV folds with gap embargo.
+
+    Each fold enforces:
+    - train ends at T
+    - gap from T to T+GAP
+    - validation starts at T+GAP for VAL_LEN
+    """
+    if not df.index.is_monotonic_increasing:
+        raise ValueError("df.index must be monotonic increasing for timestamp folds")
+
+    if len(df) < max(1, train_min_bars):
+        return []
+
+    val_delta = pd.Timedelta(days=val_len_days)
+    gap_delta = pd.Timedelta(days=gap_days)
+
+    # earliest validation end that preserves train_min_bars before the gap
+    earliest_val_end = df.index[min(train_min_bars - 1, len(df) - 1)] + gap_delta + val_delta
+    latest_val_end = df.index.max()
+
+    if earliest_val_end >= latest_val_end:
+        return []
+
+    val_end_candidates = np.linspace(
+        int(earliest_val_end.value), int(latest_val_end.value), num=n_folds
+    )
+
+    folds = []
+    last_val_start = None
+    for end_val in val_end_candidates:
+        val_end = pd.to_datetime(int(end_val))
+        val_start = val_end - val_delta
+        train_end = val_start - gap_delta
+
+        if mode == "rolling" and rolling_train_months:
+            train_start = train_end - relativedelta(months=rolling_train_months)
+        else:
+            train_start = df.index.min()
+
+        if last_val_start and val_start <= last_val_start:
+            continue
+
+        train_mask = (df.index >= train_start) & (df.index < train_end)
+        val_mask = (df.index >= val_start) & (df.index < val_end)
+
+        if train_mask.sum() < train_min_bars or val_mask.sum() == 0:
+            continue
+
+        folds.append(
+            {
+                "train_idx": df.index[train_mask],
+                "val_idx": df.index[val_mask],
+                "train_start": train_start,
+                "train_end": train_end,
+                "gap_start": train_end,
+                "gap_end": val_start,
+                "val_start": val_start,
+                "val_end": val_end,
+            }
+        )
+
+        last_val_start = val_start
+
+    return folds
+
 def make_xgb_classifier(params: dict) -> XGBClassifier:
     """
     Helper to build classifiers with a defined estimator type.
@@ -61,7 +134,7 @@ def make_xgb_classifier(params: dict) -> XGBClassifier:
         model._estimator_type = "classifier"
     return model
 
-def optuna_objective(trial, X, y, fwd_ret, cfg: TrainConfig):
+def optuna_objective(trial, X, y, fwd_ret, folds, cfg: TrainConfig):
     # baseline spw from full training set (still OK; fold uses train-only baseline below)
     spw_base = compute_spw_baseline(y)
     spw = trial.suggest_float("scale_pos_weight", 0.7 * spw_base, 1.7 * spw_base)
@@ -84,14 +157,14 @@ def optuna_objective(trial, X, y, fwd_ret, cfg: TrainConfig):
         "eval_metric": "logloss",
     }
 
-    tscv = TimeSeriesSplit(n_splits=cfg.N_SPLITS)
     fold_scores = []
     fold_primary = []
 
-    for train_idx, val_idx in tscv.split(X):
-        X_tr, X_va = X.iloc[train_idx], X.iloc[val_idx]
-        y_tr, y_va = y.iloc[train_idx], y.iloc[val_idx]
-        fr_va = fwd_ret.iloc[val_idx]
+    for fold in folds:
+        train_idx, val_idx = fold["train_idx"], fold["val_idx"]
+        X_tr, X_va = X.loc[train_idx], X.loc[val_idx]
+        y_tr, y_va = y.loc[train_idx], y.loc[val_idx]
+        fr_va = fwd_ret.loc[val_idx]
 
         # fold-corrected spw baseline (institution practice)
         spw_fold = compute_spw_baseline(y_tr)
@@ -182,6 +255,19 @@ def train_one_ticker(ib: IB, ticker: str, cfg: TrainConfig):
     y = df_train["direction"]
     fr = df_train["fwd_ret"]
 
+    folds = timestamp_folds(
+        df_train,
+        train_min_bars=cfg.CV_TRAIN_MIN_BARS,
+        val_len_days=cfg.CV_VAL_LEN_DAYS,
+        gap_days=cfg.CV_GAP_DAYS,
+        n_folds=cfg.CV_N_FOLDS,
+        mode=cfg.CV_MODE,
+        rolling_train_months=cfg.CV_ROLLING_TRAIN_MONTHS,
+    )
+
+    if not folds:
+        raise ValueError("Insufficient data to construct timestamp CV folds")
+
     # Tune
     if cfg.FAST_MODE:
         best_params = {
@@ -204,7 +290,11 @@ def train_one_ticker(ib: IB, ticker: str, cfg: TrainConfig):
     else:
         sampler = TPESampler(seed=42)
         study = optuna.create_study(direction="maximize", sampler=sampler)
-        study.optimize(lambda t: optuna_objective(t, X, y, fr, cfg), n_trials=cfg.N_TRIALS, show_progress_bar=False)
+        study.optimize(
+            lambda t: optuna_objective(t, X, y, fr, folds, cfg),
+            n_trials=cfg.N_TRIALS,
+            show_progress_bar=False,
+        )
         best_params = dict(study.best_params)
         best_params.update({
             "random_state": 42,
@@ -297,6 +387,24 @@ def train_one_ticker(ib: IB, ticker: str, cfg: TrainConfig):
             "min_precision": cfg.MIN_PRECISION,
             "proba_signal_th": cfg.PROBA_SIGNAL_TH,
             "cost_bps": cfg.COST_BPS,
+        },
+        "cv": {
+            "cv_scheme": "timestamp_folds",
+            "gap_days": cfg.CV_GAP_DAYS,
+            "val_len_days": cfg.CV_VAL_LEN_DAYS,
+            "mode": cfg.CV_MODE,
+            "n_folds_effective": len(folds),
+            "folds": [
+                {
+                    "train_start": f["train_start"].isoformat(),
+                    "train_end": f["train_end"].isoformat(),
+                    "gap_start": f["gap_start"].isoformat(),
+                    "gap_end": f["gap_end"].isoformat(),
+                    "val_start": f["val_start"].isoformat(),
+                    "val_end": f["val_end"].isoformat(),
+                }
+                for f in folds
+            ],
         },
         "best_params": best_params,
         "tuned_score": tuned_score,
