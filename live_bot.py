@@ -13,7 +13,7 @@ from pipeline import make_features
 from modelio import load_bundle, build_inference_row
 from policy import decide
 from execution import initial_stop_from_atr, calc_position_size
-from utils import utc_now_iso
+from utils import utc_now_iso, send_pushover, is_regular_trading_time
 
 def get_available_funds(ib: IB) -> float:
     acct = ib.accountSummary()
@@ -49,14 +49,25 @@ def place_long_trade(ib: IB, ticker: str, qty: int, stop_price: float, cfg: BotC
     ib.qualifyContracts(contract)
 
     if cfg.PAPER_MODE:
-        print(f"[PAPER] BUY {ticker} qty={qty} stop={stop_price:.2f}")
+        paper_msg = f"[PAPER] BUY {ticker} qty={qty} stop={stop_price:.2f}"
+        print(paper_msg)
+        send_pushover("Paper order placed", paper_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
         return
 
-    mkt = MarketOrder("BUY", qty)
-    ib.placeOrder(contract, mkt)
+    try:
+        mkt = MarketOrder("BUY", qty)
+        ib.placeOrder(contract, mkt)
 
-    stp = StopOrder("SELL", qty, stop_price)
-    ib.placeOrder(contract, stp)
+        stp = StopOrder("SELL", qty, stop_price)
+        ib.placeOrder(contract, stp)
+
+        success_msg = f"BUY {ticker} qty={qty} stop={stop_price:.2f} placed"
+        print(success_msg)
+        send_pushover("Order placed", success_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
+    except Exception as exc:
+        err_msg = f"Order error for {ticker}: {exc}"
+        print(err_msg)
+        send_pushover("Order error", err_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
 
 def main():
     cfg = BotConfig()
@@ -97,6 +108,10 @@ def main():
                 print(f"{t}: p={prob_up:.3f} th={d['used_threshold']:.2f} gate={d['gate_pass']} -> {d['decision']}")
 
                 if d["decision"] == "BUY":
+                    if not is_regular_trading_time():
+                        print(f"{t}: signal outside RTH; skip execution.")
+                        continue
+
                     px = get_last_price(ib, t)
                     if not np.isfinite(px):
                         print(f"{t}: invalid market price; skip.")

@@ -79,6 +79,10 @@ class BotConfig:
     ATR_MULT_STOP: float = 2.0
     ALLOC_PER_SYMBOL: float = 0.10
 
+    # Notifications
+    PUSHOVER_TOKEN: str = ""
+    PUSHOVER_USER: str = ""
+
     # Drift monitoring (weekly)
     PSI_BINS: int = 10
     PSI_WARN: float = 0.10
