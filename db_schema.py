@@ -1,4 +1,3 @@
-# db_schema.py
 import sqlite3
 
 DDL = """
@@ -18,22 +17,23 @@ CREATE TABLE IF NOT EXISTS model_registry (
   features_checksum TEXT,
   features_count INTEGER,
   holdout_metrics_json TEXT,
-  wfo_metrics_json TEXT
+  wfo_metrics_json TEXT,
+  cv_scheme_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS actions_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts_utc TEXT NOT NULL,
   ticker TEXT NOT NULL,
-  level TEXT NOT NULL,          -- WARN/ACTION/INFO
-  action TEXT NOT NULL,         -- NONE/THROTTLE/RETRAIN/DISABLE
+  level TEXT NOT NULL,
+  action TEXT NOT NULL,
   reason TEXT NOT NULL,
   details_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS monitoring_metrics_daily (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  date TEXT NOT NULL,           -- YYYY-MM-DD
+  date TEXT NOT NULL,
   ticker TEXT NOT NULL,
   signals INTEGER,
   avg_proba REAL,
@@ -44,18 +44,18 @@ CREATE TABLE IF NOT EXISTS monitoring_metrics_daily (
   win_rate REAL,
   missing_bars_pct REAL,
   outlier_bars_pct REAL,
-  drift_flag TEXT,              -- OK/WARN/ACTION
-  action TEXT,                  -- NONE/THROTTLE/RETRAIN/DISABLE
+  drift_flag TEXT,
+  action TEXT,
   notes TEXT
 );
 
 CREATE TABLE IF NOT EXISTS drift_feature_weekly (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  week_start TEXT NOT NULL,     -- YYYY-MM-DD
+  week_start TEXT NOT NULL,
   ticker TEXT NOT NULL,
   feature TEXT NOT NULL,
   psi REAL,
-  flag TEXT                     -- OK/WARN/ACTION
+  flag TEXT
 );
 
 CREATE TABLE IF NOT EXISTS drift_pred_weekly (
@@ -70,15 +70,19 @@ CREATE TABLE IF NOT EXISTS drift_pred_weekly (
 
 CREATE TABLE IF NOT EXISTS predictions_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts TEXT NOT NULL,
+  ts_utc TEXT NOT NULL,
   ticker TEXT NOT NULL,
-  proba REAL NOT NULL,
   model_version TEXT NOT NULL,
-  features_checksum TEXT
+  features_checksum TEXT NOT NULL,
+  prob_up REAL NOT NULL,
+  used_threshold REAL NOT NULL,
+  decision TEXT NOT NULL,
+  st_direction INTEGER,
+  regime_high_vol INTEGER
 );
 """
 
-def ensure_schema(db_path: str):
+def ensure_schema(db_path: str) -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(DDL)

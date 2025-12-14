@@ -1,4 +1,3 @@
-# features.py
 import numpy as np
 import pandas as pd
 
@@ -17,7 +16,8 @@ def rsi(series, period):
     rs = ma_up / ma_down.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
-def supertrend(df, period=14, multiplier=4.0):
+def supertrend(df: pd.DataFrame, period: int = 14, multiplier: float = 4.0) -> pd.DataFrame:
+    df = df.copy()
     atr = true_range(df["High"], df["Low"], df["Close"]).rolling(period).mean()
     hl2 = (df["High"] + df["Low"]) / 2
     upper = hl2 + (multiplier * atr)
@@ -44,10 +44,26 @@ def supertrend(df, period=14, multiplier=4.0):
 
     df["supertrend"] = st
     df["st_direction"] = direction
+
+    # Supertrend-derived features (must be used consistently in training + live)
+    df["dist_supertrend"] = df["Close"] / df["supertrend"] - 1
+    df["st_flip"] = (df["st_direction"] != df["st_direction"].shift(1)).astype(int)
+    df["bars_since_st_flip"] = df["st_flip"].groupby((df["st_flip"] == 1).cumsum()).cumcount()
+    df["st_slope"] = df["supertrend"].pct_change(3)
+
     return df
 
-def add_features(df: pd.DataFrame, regime_roll: int) -> pd.DataFrame:
+def add_features(
+    df: pd.DataFrame,
+    regime_roll: int,
+    st_period: int = 14,
+    st_multiplier: float = 4.0
+) -> pd.DataFrame:
     df = df.copy()
+
+    # Validate datetime index
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
 
     df["return"] = df["Close"].pct_change()
     df["log_return"] = np.log(df["Close"] / df["Close"].shift(1))
@@ -93,7 +109,7 @@ def add_features(df: pd.DataFrame, regime_roll: int) -> pd.DataFrame:
     df["vol_sma20"] = df["Volume"].rolling(20).mean()
     df["vol_ratio"] = df["Volume"] / df["vol_sma20"].replace(0, np.nan)
 
-    # Momentum additions (high value, not redundant)
+    # Momentum + liquidity
     df["ret_3"] = df["Close"].pct_change(3)
     df["ret_6"] = df["Close"].pct_change(6)
     df["roc_20"] = df["Close"].pct_change(20)
@@ -101,26 +117,16 @@ def add_features(df: pd.DataFrame, regime_roll: int) -> pd.DataFrame:
     df["dollar_vol_sma20"] = df["dollar_vol"].rolling(20).mean()
     df["rel_dollar_vol"] = df["dollar_vol"] / df["dollar_vol_sma20"].replace(0, np.nan)
 
-    # Day-of-week (0-6) as integer (tree handles it fine); optional one-hot later
-    df["dow"] = pd.Series(df.index).dt.dayofweek.values
+    # Day-of-week as integer
+    df["dow"] = df.index.dayofweek
 
-    # SuperTrend + regime
-    df = supertrend(df, period=14, multiplier=4.0)
+    # Supertrend + derived features (single source of truth)
+    df = supertrend(df, period=st_period, multiplier=st_multiplier)
 
-    # SuperTrend-derived features
-    df["dist_supertrend"] = df["Close"] / df["supertrend"].replace(0, np.nan) - 1
-    st_flip = (df["st_direction"].diff().fillna(0) != 0).astype(int)
-    df["st_flip"] = st_flip
-    flip_groups = st_flip.cumsum()
-    baseline = flip_groups.where(st_flip == 1).ffill().fillna(0)
-    df["bars_since_st_flip"] = (flip_groups - baseline).astype(int)
-    df["st_slope"] = df["supertrend"].pct_change(periods=5)
-
-    # Regime z-scores
+    # Regime
     df["atrp_14_z"] = (df["atrp_14"] - df["atrp_14"].rolling(regime_roll).mean()) / df["atrp_14"].rolling(regime_roll).std()
     df["bb_width_20_z"] = (df["bb_width_20"] - df["bb_width_20"].rolling(regime_roll).mean()) / df["bb_width_20"].rolling(regime_roll).std()
 
-    # Regime flags
     q75 = df["atrp_14"].rolling(regime_roll).quantile(0.75)
     q25 = df["atrp_14"].rolling(regime_roll).quantile(0.25)
     df["regime_high_vol"] = (df["atrp_14"] > q75).astype(int)
@@ -139,6 +145,5 @@ def add_label(df: pd.DataFrame, horizon_bars: int, atr_k: float, min_label_pct: 
     thr = (atr_k * (df["atr_14"] / df["Close"].replace(0, np.nan))).fillna(min_label_pct)
     thr = np.maximum(thr, min_label_pct)
     df["label_thr"] = thr
-
     df["direction"] = (df["fwd_ret"] >= df["label_thr"]).astype(int)
     return df
