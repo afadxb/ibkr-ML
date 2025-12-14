@@ -67,6 +67,15 @@ CREATE TABLE IF NOT EXISTS drift_pred_weekly (
   ks_stat REAL,
   flag TEXT
 );
+
+CREATE TABLE IF NOT EXISTS predictions_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  ticker TEXT NOT NULL,
+  proba REAL NOT NULL,
+  model_version TEXT NOT NULL,
+  features_checksum TEXT
+);
 """
 
 def ensure_schema(db_path: str):
