@@ -68,6 +68,14 @@ python monitor.py
 
 The script calculates missing/outlier bar rates over the last 30 days and writes a row per ticker into `monitoring_metrics_daily`. Model registry lookups provide holdout metrics as a health proxy.
 
+Run weekly (Sunday PM or Monday AM) to compute feature PSI and prediction KS drift using training-period baselines:
+
+```bash
+python drift_monitor.py
+```
+
+`drift_monitor.py` recomputes features from cached bars, aligns baselines to the recorded training window, and writes PSI per feature (`drift_feature_weekly`) plus KS stats on predicted probabilities (`drift_pred_weekly`). It also upserts action recommendations into `actions_log` when PSI/KS thresholds trigger retraining rules.
+
 ## Dashboard
 Visualize monitoring trends and recent registry entries via Streamlit:
 
