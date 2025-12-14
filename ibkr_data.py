@@ -7,7 +7,10 @@ def get_cached_data(db_path: str, ticker: str) -> pd.DataFrame:
     conn = sqlite3.connect(db_path)
     try:
         df = pd.read_sql(f"SELECT * FROM '{ticker}'", conn, index_col="timestamp", parse_dates=True)
-        df.sort_index(inplace=True)
+        if not df.empty:
+            df.index = pd.to_datetime(df.index, errors="coerce", utc=True).tz_convert(None)
+            df = df[~df.index.isna()]
+            df.sort_index(inplace=True)
     except Exception:
         df = pd.DataFrame()
     finally:
@@ -17,7 +20,10 @@ def get_cached_data(db_path: str, ticker: str) -> pd.DataFrame:
 def save_cache(db_path: str, ticker: str, df: pd.DataFrame) -> None:
     conn = sqlite3.connect(db_path)
     try:
-        df.to_sql(ticker, conn, if_exists="replace")
+        # ensure sqlite-friendly index (naive datetime)
+        df = df.copy()
+        df.index = pd.to_datetime(df.index, errors="coerce", utc=True).tz_convert(None)
+        df.to_sql(ticker, conn, if_exists="replace", index_label="timestamp")
         conn.commit()
     finally:
         conn.close()
@@ -68,7 +74,12 @@ def fetch_and_cache(
     if not iv_df.empty:
         new_df["implied_vol"] = iv_df["Close"].reindex(new_df.index)
 
+    # normalize indexes to datetime to avoid mixed Timestamp/str sorting errors
+    new_df.index = pd.to_datetime(new_df.index, errors="coerce", utc=True).tz_convert(None)
+    cached.index = pd.to_datetime(cached.index, errors="coerce", utc=True).tz_convert(None) if not cached.empty else cached.index
+
     df = pd.concat([cached, new_df]) if not cached.empty else new_df
+    df = df[~df.index.isna()]
     df = df[~df.index.duplicated(keep="last")]
     df.sort_index(inplace=True)
 

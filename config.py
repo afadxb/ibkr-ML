@@ -4,11 +4,12 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class TrainConfig:
     # Universe
-    TICKERS: tuple = ("TSLA","NVDA","META","AAPL","AMD","GOOGL","AMZN","MSFT","PLTR","AVGO")
+    #TICKERS: tuple = ("TSLA","NVDA","META","AAPL","AMD","GOOGL","AMZN","MSFT","PLTR","AVGO")
+    TICKERS: tuple = ("TSLA","NVDA")
 
     # Data
     DATA_DB: str = "market_data_cache.db"
-    MODEL_DIR: str = "multi_models"
+    MODEL_DIR: str = "models"
     BAR_SIZE: str = "2 hours"
     WHAT_TO_SHOW: str = "TRADES"
     USE_RTH: bool = True
