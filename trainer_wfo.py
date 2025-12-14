@@ -50,6 +50,17 @@ def compute_spw_baseline(y: pd.Series) -> float:
         return 1.0
     return max(1.0, min(20.0, neg / pos))
 
+def make_xgb_classifier(params: dict) -> XGBClassifier:
+    """
+    Helper to build classifiers with a defined estimator type.
+    xgboost>=3.x no longer sets `_estimator_type`, but sklearn helpers (and save_model)
+    still expect it to exist.
+    """
+    model = XGBClassifier(**params)
+    if not hasattr(model, "_estimator_type"):
+        model._estimator_type = "classifier"
+    return model
+
 def optuna_objective(trial, X, y, fwd_ret, cfg: TrainConfig):
     # baseline spw from full training set (still OK; fold uses train-only baseline below)
     spw_base = compute_spw_baseline(y)
@@ -88,7 +99,7 @@ def optuna_objective(trial, X, y, fwd_ret, cfg: TrainConfig):
         # keep trial’s spw near baseline but anchor to fold baseline by scaling
         params_fold["scale_pos_weight"] = max(1.0, min(20.0, params["scale_pos_weight"] * (spw_fold / spw_base)))
 
-        m = XGBClassifier(**params_fold)
+        m = make_xgb_classifier(params_fold)
         m.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
 
         proba = m.predict_proba(X_va)[:, 1]
@@ -123,7 +134,7 @@ def wfo_splits(df: pd.DataFrame, cfg: TrainConfig):
         train_end = train_start + relativedelta(months=cfg.WFO_TRAIN_MONTHS)
 
 def evaluate_window(X_tr, y_tr, fr_tr, X_va, y_va, fr_va, best_params, cfg: TrainConfig):
-    m = XGBClassifier(**best_params)
+    m = make_xgb_classifier(best_params)
     m.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
     proba = m.predict_proba(X_va)[:, 1]
     return trading_metrics(y_va.values, proba, fr_va.values, cfg.PROBA_SIGNAL_TH, cfg.COST_BPS)
@@ -204,7 +215,7 @@ def train_one_ticker(ib: IB, ticker: str, cfg: TrainConfig):
         tuned_score = float(study.best_value)
 
     # Baseline model for SHAP prune
-    base = XGBClassifier(**best_params)
+    base = make_xgb_classifier(best_params)
     base.fit(X, y, verbose=False)
     pruned = shap_select_features(base, X, cfg.SHAP_TOP_K)
 
@@ -213,7 +224,7 @@ def train_one_ticker(ib: IB, ticker: str, cfg: TrainConfig):
     yp = df_train["direction"]
     frp = df_train["fwd_ret"]
 
-    final_model = XGBClassifier(**best_params)
+    final_model = make_xgb_classifier(best_params)
     final_model.fit(Xp, yp, verbose=False)
 
     # Holdout evaluation (headline)
