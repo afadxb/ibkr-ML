@@ -3,8 +3,8 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class BotConfig:
     # Universe
-    #TICKERS: tuple = ("TSLA","NVDA","META","AAPL","AMD","GOOGL","AMZN","MSFT","PLTR","AVGO")
-    TICKERS: tuple = ("TSLA","NVDA")
+    TICKERS: tuple = ("TSLA","NVDA","META","AAPL","AMD","GOOGL","AMZN","MSFT","PLTR","AVGO")
+    #TICKERS: tuple = ("TSLA","NVDA")
                   
     # Storage
     DATA_DB: str = "market_data_cache.db"
@@ -73,15 +73,15 @@ class BotConfig:
     HIGH_VOL_TH_BUMP: float = 0.05
 
     # Execution/risk (live)
-    PAPER_MODE: bool = True
+    PAPER_MODE: bool = False
     ALLOW_SHORTS: bool = False
-    RISK_PER_TRADE: float = 0.01
+    RISK_PER_TRADE: float = 0.10
     ATR_MULT_STOP: float = 2.0
-    ALLOC_PER_SYMBOL: float = 0.10
+    ALLOC_PER_SYMBOL: float = 0.20
 
     # Notifications
-    PUSHOVER_TOKEN: str = ""
-    PUSHOVER_USER: str = ""
+    PUSHOVER_TOKEN: str = "au52q3ukcwero2qxabcgbwrfpqr5h8"
+    PUSHOVER_USER: str = "uoj6TEuswQvNkBiUCFNTtkst26iuYw"
 
     # Drift monitoring (weekly)
     PSI_BINS: int = 10
