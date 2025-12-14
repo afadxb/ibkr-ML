@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 
+from config import BotConfig
+
 def true_range(high, low, close):
     tr1 = high - low
     tr2 = (high - close.shift()).abs()
@@ -16,7 +18,11 @@ def rsi(series, period):
     rs = ma_up / ma_down.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
-def supertrend(df: pd.DataFrame, period: int = 14, multiplier: float = 4.0) -> pd.DataFrame:
+def supertrend(
+    df: pd.DataFrame,
+    period: int = BotConfig.SUPERTREND_PERIOD,
+    multiplier: float = BotConfig.SUPERTREND_MULTIPLIER,
+) -> pd.DataFrame:
     df = df.copy()
     atr = true_range(df["High"], df["Low"], df["Close"]).rolling(period).mean()
     hl2 = (df["High"] + df["Low"]) / 2
@@ -56,8 +62,8 @@ def supertrend(df: pd.DataFrame, period: int = 14, multiplier: float = 4.0) -> p
 def add_features(
     df: pd.DataFrame,
     regime_roll: int,
-    st_period: int = 14,
-    st_multiplier: float = 4.0
+    st_period: int = BotConfig.SUPERTREND_PERIOD,
+    st_multiplier: float = BotConfig.SUPERTREND_MULTIPLIER,
 ) -> pd.DataFrame:
     df = df.copy()
 
