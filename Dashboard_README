@@ -1,0 +1,195 @@
+# ML Trading System – Monitoring Dashboard
+
+## Overview
+
+`dashboard_monitor.py` implements a **Streamlit-based monitoring dashboard** for an ML-driven trading system.  
+It visualizes **production health, data integrity, and real-world trading performance** using metrics stored in a **SQLite database**.
+
+The dashboard is opinionated by design:  
+**data integrity and live profitability matter more than offline accuracy.**
+
+---
+
+## Dashboard Structure
+
+The KPIs are grouped into two major categories:
+
+1. **Data Quality & Drift**
+2. **Model Performance & Trading Metrics**
+
+A separate **Model Registry** section tracks training and validation quality before deployment.
+
+---
+
+## 📊 Key Performance Indicators (KPIs)
+
+### 1. Data Quality & Drift KPIs
+
+These metrics ensure the **input data remains trustworthy** and the model is not operating on degraded or drifting features.
+
+| KPI | Description | Page |
+|---|---|---|
+| **Missing Bars %** | Percentage of expected time-series bars (e.g. 4H bars) missing in the latest monitoring window. Indicates data pipeline or broker feed issues. | Overview, Drilldown |
+| **Outlier Bars %** | Percentage of bars flagged as statistical outliers based on feature deviation. Strong early drift signal. | Drilldown |
+| **Drift Flag** | Categorical status (`OK`, `WARN`, `ACTION`) derived from combined data quality and distribution drift checks. | Overview, Drilldown |
+| **WARN/ACTION Count** | Number of tickers currently flagged as `WARN` or `ACTION`. | Overview |
+
+---
+
+### 2. Model Performance & Trading KPIs (Production Proxy)
+
+These KPIs measure **actual trading effectiveness** using a holdout / production-proxy window.
+
+| KPI | Description | Page |
+|---|---|---|
+| **Expectancy Net (proxy)** | Average forward return per model signal (net of costs if included). Core profitability metric. | Overview, Drilldown |
+| **Profit Factor (PF) (proxy)** | Ratio of gross profits to gross losses:  
+`PF = Σ(Positive Returns) / Σ(|Negative Returns|)` | Overview, Drilldown |
+
+---
+
+## 🚨 Most Important KPIs (Non-Negotiable)
+
+### 1. Drift Flag & WARN/ACTION Count **(Primary)**
+
+**Why it matters**  
+This is the system’s **health summary**.  
+An `ACTION` flag means the model or its data is **no longer trustworthy**.
+
+**Watch for**
+- Any non-zero `WARN/ACTION Count` on the Overview page
+- Any ticker marked `ACTION` on Drilldown
+
+**Action**
+- Investigate data pipeline
+- Trigger retraining or model rollback
+
+---
+
+### 2. Expectancy Net (proxy) **(Primary)**
+
+**Why it matters**  
+This is **profit per signal**. Nothing else matters if this is negative.
+
+**Watch for**
+- Downward trends
+- Values near or below zero
+
+**Action**
+- Decommission or retrain the model immediately if expectancy < 0
+
+---
+
+### 3. Missing Bars % **(Secondary)**
+
+**Why it matters**  
+High missing data leads to **biased features, broken signals, and false confidence**.
+
+**Watch for**
+- Sudden spikes
+- Persistently elevated values
+
+**Action**
+- Investigate IBKR connectivity, caching, or ingestion failures
+
+---
+
+### 4. Profit Factor (proxy) **(Secondary)**
+
+**Why it matters**  
+Expectancy shows average trade quality.  
+PF shows **strategy robustness**.
+
+**Watch for**
+- PF consistently below **1.5** (or your defined threshold)
+- Sharp declines versus baseline
+
+**Action**
+- Strategy degradation → retraining or feature review
+
+---
+
+## 📋 Model Registry Metrics
+
+The **Model Registry** monitors KPIs captured during **training and Walk-Forward Optimization (WFO/CV)**.
+
+Metrics are extracted from:
+- `wfo_metrics_json`
+- `holdout_metrics_json`
+
+These represent **pre-deployment model quality gates**.
+
+---
+
+### Training & Cross-Validation Metrics
+
+| Metric | Source | Description | Priority |
+|---|---|---|---|
+| **Precision** | `cv_summary['precision']` | Ratio of true positives to all predicted positives. Measures signal reliability. | **Primary** |
+| **Profit Factor Proxy** | `cv_summary['profit_factor_proxy']` | Profitability across CV folds. | **Primary** |
+| **Expectancy Proxy** | `cv_summary['expectancy_proxy']` | Average forward return per signal during CV. | Secondary |
+| **Signals / Fold** | `cv_summary['signals']` | Average signal frequency per CV fold. | Secondary |
+| **ROC-AUC** | `cv_summary['roc_auc']` | General classification strength across thresholds. | Secondary |
+
+---
+
+## 🚨 Critical Registry Checks Before Deployment
+
+### 1. Precision (CV Summary) **(Primary)**
+
+**Why it matters**  
+The training objective explicitly **optimizes for precision**.  
+Low precision = unreliable signals = guaranteed losses.
+
+**Watch for**
+- Any drop versus the previous registered model
+
+---
+
+### 2. Profit Factor Proxy (CV Summary) **(Primary)**
+
+**Why it matters**  
+This is the **ultimate backtest profitability signal**.
+
+**Watch for**
+- PF below **1.5** (warning)
+- PF below **1.0** (hard fail)
+
+---
+
+### 3. Holdout Metrics vs CV Metrics **(Primary)**
+
+**Why it matters**  
+Holdout metrics are calculated on **unseen data**.  
+They expose **overfitting immediately**.
+
+**Watch for**
+- Large drops in PF, Precision, or Expectancy from CV → Holdout
+- PF < 1.0 in holdout even if CV looked strong
+
+**Action**
+- Reject the model version
+- Revisit feature set, labeling, or regularization
+
+---
+
+## Design Philosophy (Opinionated)
+
+- **Production truth > backtests**
+- **Expectancy beats accuracy**
+- **Drift kills faster than bad models**
+- **If PF < 1, the model is dead**
+
+This dashboard exists to **kill bad models early** — not to admire charts.
+
+
+Original text:
+The provided script, dashboard_monitor.py, implements a Streamlit dashboard for monitoring an ML trading system using metrics stored in a SQLite database. The Key Performance Indicators (KPIs) can be grouped into Data Quality/Drift and Model Performance/Trading Metrics.Here is a brief explanation of the KPIs and the most important ones to watch for:📊 Key Performance Indicators (KPIs)1. Data Quality and Drift KPIsThese metrics monitor the health of the input data and feature distribution.KPIDescriptionPage LocationMissing Bars %The percentage of expected time-series bars (e.g., 4-hour bars) that were missing in the latest monitoring period.Overview, DrilldownOutlier Bars %The percentage of bars in the latest data that were flagged as outliers (e.g., based on statistical deviation of features). This indicates potential data drift.DrilldownDrift FlagA categorical flag (e.g., "OK", "WARN", "ACTION") derived from data quality and feature/prediction distribution drift checks.Overview, Drilldown2. Model Performance and Trading KPIsThese metrics use a "holdout" or "production proxy" period to evaluate the model's actual trading effectiveness.KPIDescriptionPage LocationExpectancy Net (proxy)The average forward return (net of transaction costs, if factored in) realized on signals generated by the model in the holdout period. A key measure of profitability per trade.Overview, DrilldownProfit Factor (PF) (proxy)The ratio of gross profit to gross loss (total positive forward returns / total absolute negative forward returns) on signals generated by the model. $PF = \frac{\sum (\text{Positive Returns})}{\sum\text{Negative Returns}WARN/ACTION CountThe total number of tickers where the latest Drift Flag is "WARN" or "ACTION".Overview🚨 Most Important KPIs to WatchThe most critical KPIs are those that directly indicate a loss of data integrity or model effectiveness in the real world.Drift Flag / WARN/ACTION Count (Primary)Why it's important: This is the summary status. An "ACTION" flag means the model or its input data has significantly degraded, requiring immediate attention, potentially triggering retraining or investigation.Watch for: Any count above zero in the "WARN/ACTION Count" on the Overview page, or an "ACTION" status on the Drilldown page.Expectancy Net (proxy) (Primary)Why it's important: This is the most direct measure of profitability per signal. If this value drops below zero, the model is losing money on average and should be decommissioned or retrained.Watch for: A downward trend on the Overview or Drilldown charts, or a value near or below zero.Missing Bars % (Secondary)Why it's important: High missing bars can signal issues with the data provider (IBKR) connection or caching process, leading to incomplete or biased training/prediction data.Watch for: Sudden spikes or consistently high values on the Overview or Drilldown charts, as this is a core data integrity issue.Profit Factor (proxy) (Secondary)Why it's important: While Expectancy is good for average trade quality, PF indicates the quality of the trading strategy. A PF consistently below $1.5$ (or a chosen threshold) suggests the strategy's winners aren't large enough to cover the losers.Watch for: A significant decline from the expected baseline PF.
+
+📋 Analysis of Model Registry Metrics
+The Model Registry section of the dashboard monitors the key performance indicators (KPIs) captured during the model training and cross-validation (CV) process.
+
+Training and Cross-Validation (CV) MetricsThese metrics are extracted from the wfo_metrics_json (Walk-Forward Optimization/CV Summary) and the holdout_metrics_json fields, which store the results of the model evaluation before deployment.MetricSource Script ContextDescriptionImportant for Watch?Precisioncv_summary.get('precision') (Optimized for this)The ratio of correctly predicted positive signals ($\text{True Positives}$) to all predicted positive signals ($\text{True Positives} + \text{False Positives}$). It measures the reliability of the signal.PrimaryProfit Factor Proxycv_summary.get('profit_factor_proxy')The ratio of total positive forward returns to total absolute negative forward returns across the CV folds. This indicates the strategy's risk-adjusted profitability potential.PrimaryExpectancy Proxycv_summary.get('expectancy_proxy')The average forward return of all trades signaled by the model during CV. Represents the average profit/loss per signaled trade.SecondarySignals/Foldcv_summary.get('signals')The average number of predicted positive signals generated in each CV fold. Monitors the signal frequency of the model.SecondaryROC-AUCcv_summary.get('roc_auc')Measures the model's ability to distinguish between the positive and negative classes across all possible probability thresholds. A common measure of general classification strength.Secondary
+
+
+🚨 Important KPIs to Watch in the RegistryWhen a new model version is registered, you primarily want to ensure it has met the necessary quality and profitability thresholds established by the trainer (multi_stock_training.py):Precision (CV Summary) (Primary):Why it's important: The training objective in the script explicitly prioritizes maximizing precision, as high precision means when the model signals a trade, it is highly likely to be correct. A drop here suggests a failure to learn reliable patterns.Watch for: Any new model with a significantly lower precision score than its predecessor.Profit Factor Proxy (CV Summary) (Primary):Why it's important: A high Profit Factor (e.g., typically $>1.5$) indicates that the profits generated on winning signals outweigh the losses on losing signals by a comfortable margin during backtesting. This is the ultimate measure of training success for a trading system.Watch for: A Profit Factor below the desired profitable threshold (e.g., $1.0$).Holdout Metrics (Post-CV Evaluation) (Primary):Why it's important: These metrics (e.g., Precision, PF, Expectancy) reported under holdout_metrics_json are calculated on data that was never seen during the CV optimization process. They serve as the final, most unbiased check of the model's performance before deployment.Watch for: Any significant degradation in performance (e.g., PF dropping below $1.0$) between the CV Summary metrics and the Holdout metrics. A large drop indicates overfitting during the training/CV process.
