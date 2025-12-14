@@ -1,11 +1,6 @@
-# trainer_wfo.py
-import os
-import json
-import hashlib
-import sqlite3
+from __future__ import annotations
+import os, json, sqlite3
 from datetime import datetime, timezone
-from dateutil.relativedelta import relativedelta
-
 import numpy as np
 import pandas as pd
 import optuna
@@ -13,17 +8,29 @@ from optuna.samplers import TPESampler
 from xgboost import XGBClassifier
 from ib_insync import IB
 
-from config import TrainConfig
+from config import BotConfig
 from db_schema import ensure_schema
-from ibkr_data import fetch_and_cache
-from features import add_features, add_label
-from metrics import trading_metrics, constrained_objective_foldscore
+from datahub import refresh_cache
+from pipeline import make_labeled_frame
+from metrics import trading_metrics, constrained_fold_score
+from utils import features_checksum, utc_now_iso
+from cv import timestamp_folds
 
-def sha256_text(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+def compute_spw_baseline(y: pd.Series) -> float:
+    pos = float((y == 1).sum())
+    neg = float((y == 0).sum())
+    if pos <= 0:
+        return 1.0
+    return max(1.0, min(20.0, neg / pos))
 
-def features_checksum(features: list[str]) -> str:
-    return sha256_text("\n".join(features))
+def make_xgb_classifier(params: dict) -> XGBClassifier:
+    """
+    Ensure sklearn wrapper carries estimator type so save_model works with xgboost>=3.
+    """
+    m = XGBClassifier(**params)
+    if not hasattr(m, "_estimator_type"):
+        m._estimator_type = "classifier"
+    return m
 
 def shap_select_features(model: XGBClassifier, X: pd.DataFrame, top_k: int) -> list[str]:
     try:
@@ -42,102 +49,9 @@ def shap_select_features(model: XGBClassifier, X: pd.DataFrame, top_k: int) -> l
         gains = {n: booster.get_score(importance_type="gain").get(n, 0.0) for n in names}
         return sorted(gains, key=gains.get, reverse=True)[:top_k]
 
-def compute_spw_baseline(y: pd.Series) -> float:
-    pos = float((y == 1).sum())
-    neg = float((y == 0).sum())
-    if pos <= 0:
-        return 1.0
-    return max(1.0, min(20.0, neg / pos))
-
-def timestamp_folds(
-    df: pd.DataFrame,
-    train_min_bars: int,
-    val_len_days: int,
-    gap_days: int,
-    n_folds: int,
-    mode: str = "expanding",
-    rolling_train_months: int | None = None,
-):
-    """Generate timestamp-based CV folds with gap embargo.
-
-    Each fold enforces:
-    - train ends at T
-    - gap from T to T+GAP
-    - validation starts at T+GAP for VAL_LEN
-    """
-    if not df.index.is_monotonic_increasing:
-        raise ValueError("df.index must be monotonic increasing for timestamp folds")
-
-    if len(df) < max(1, train_min_bars):
-        return []
-
-    val_delta = pd.Timedelta(days=val_len_days)
-    gap_delta = pd.Timedelta(days=gap_days)
-
-    # earliest validation end that preserves train_min_bars before the gap
-    earliest_val_end = df.index[min(train_min_bars - 1, len(df) - 1)] + gap_delta + val_delta
-    latest_val_end = df.index.max()
-
-    if earliest_val_end >= latest_val_end:
-        return []
-
-    val_end_candidates = np.linspace(
-        int(earliest_val_end.value), int(latest_val_end.value), num=n_folds
-    )
-
-    folds = []
-    last_val_start = None
-    for end_val in val_end_candidates:
-        val_end = pd.to_datetime(int(end_val))
-        val_start = val_end - val_delta
-        train_end = val_start - gap_delta
-
-        if mode == "rolling" and rolling_train_months:
-            train_start = train_end - relativedelta(months=rolling_train_months)
-        else:
-            train_start = df.index.min()
-
-        if last_val_start and val_start <= last_val_start:
-            continue
-
-        train_mask = (df.index >= train_start) & (df.index < train_end)
-        val_mask = (df.index >= val_start) & (df.index < val_end)
-
-        if train_mask.sum() < train_min_bars or val_mask.sum() == 0:
-            continue
-
-        folds.append(
-            {
-                "train_idx": df.index[train_mask],
-                "val_idx": df.index[val_mask],
-                "train_start": train_start,
-                "train_end": train_end,
-                "gap_start": train_end,
-                "gap_end": val_start,
-                "val_start": val_start,
-                "val_end": val_end,
-            }
-        )
-
-        last_val_start = val_start
-
-    return folds
-
-def make_xgb_classifier(params: dict) -> XGBClassifier:
-    """
-    Helper to build classifiers with a defined estimator type.
-    xgboost>=3.x no longer sets `_estimator_type`, but sklearn helpers (and save_model)
-    still expect it to exist.
-    """
-    model = XGBClassifier(**params)
-    if not hasattr(model, "_estimator_type"):
-        model._estimator_type = "classifier"
-    return model
-
-def optuna_objective(trial, X, y, fwd_ret, folds, cfg: TrainConfig):
-    # baseline spw from full training set (still OK; fold uses train-only baseline below)
+def optuna_objective(trial, X, y, fwd_ret, df_index, cfg: BotConfig):
     spw_base = compute_spw_baseline(y)
-    spw = trial.suggest_float("scale_pos_weight", 0.7 * spw_base, 1.7 * spw_base)
+    spw = trial.suggest_float("scale_pos_weight", 0.7*spw_base, 1.7*spw_base)
     spw = max(1.0, min(20.0, spw))
 
     params = {
@@ -157,62 +71,43 @@ def optuna_objective(trial, X, y, fwd_ret, folds, cfg: TrainConfig):
         "eval_metric": "logloss",
     }
 
-    fold_scores = []
+    folds = timestamp_folds(
+        df_index, n_folds=cfg.N_SPLITS,
+        val_days=cfg.CV_VAL_DAYS,
+        gap_days=cfg.CV_GAP_DAYS,
+        min_train_bars=cfg.CV_MIN_TRAIN_BARS,
+        mode=cfg.CV_MODE,
+        rolling_train_months=cfg.CV_ROLLING_TRAIN_MONTHS
+    )
+    if not folds:
+        return -999.0
+
     fold_primary = []
+    for f in folds:
+        tr_mask = (df_index >= f.train_start) & (df_index < f.train_end)
+        va_mask = (df_index >= f.val_start) & (df_index < f.val_end)
 
-    for fold in folds:
-        train_idx, val_idx = fold["train_idx"], fold["val_idx"]
-        X_tr, X_va = X.loc[train_idx], X.loc[val_idx]
-        y_tr, y_va = y.loc[train_idx], y.loc[val_idx]
-        fr_va = fwd_ret.loc[val_idx]
+        X_tr, y_tr = X.loc[tr_mask], y.loc[tr_mask]
+        X_va, y_va = X.loc[va_mask], y.loc[va_mask]
+        fr_va = fwd_ret.loc[va_mask]
 
-        # fold-corrected spw baseline (institution practice)
         spw_fold = compute_spw_baseline(y_tr)
         params_fold = dict(params)
-        # keep trial’s spw near baseline but anchor to fold baseline by scaling
         params_fold["scale_pos_weight"] = max(1.0, min(20.0, params["scale_pos_weight"] * (spw_fold / spw_base)))
 
         m = make_xgb_classifier(params_fold)
         m.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
-
         proba = m.predict_proba(X_va)[:, 1]
+
         tm = trading_metrics(y_va.values, proba, fr_va.values, cfg.PROBA_SIGNAL_TH, cfg.COST_BPS)
-        score = constrained_objective_foldscore(tm, cfg.MIN_SIGNALS, cfg.MIN_PRECISION)
-        fold_scores.append(score)
         fold_primary.append(tm["avg_fwd_ret_on_signals_net"])
 
-    # robust aggregation: median primary, stability penalty via IQR
     primary = np.nanmedian(fold_primary)
     iqr = np.nanpercentile(fold_primary, 75) - np.nanpercentile(fold_primary, 25)
     penalty = 0.5 * (0.0 if np.isnan(iqr) else iqr)
-    final = float(primary - penalty)
+    return float(primary - penalty)
 
-    return final
-
-def wfo_splits(df: pd.DataFrame, cfg: TrainConfig):
-    # uses datetime index; creates rolling windows
-    start = df.index.min()
-    end = df.index.max()
-    # first train end = start + train months
-    train_start = start
-    train_end = train_start + relativedelta(months=cfg.WFO_TRAIN_MONTHS)
-    while True:
-        val_start = train_end
-        val_end = val_start + relativedelta(months=cfg.WFO_VAL_MONTHS)
-        if val_end >= end:
-            break
-        yield (train_start, train_end, val_start, val_end)
-        # step forward
-        train_start = train_start + relativedelta(months=cfg.WFO_STEP_MONTHS)
-        train_end = train_start + relativedelta(months=cfg.WFO_TRAIN_MONTHS)
-
-def evaluate_window(X_tr, y_tr, fr_tr, X_va, y_va, fr_va, best_params, cfg: TrainConfig):
-    m = make_xgb_classifier(best_params)
-    m.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
-    proba = m.predict_proba(X_va)[:, 1]
-    return trading_metrics(y_va.values, proba, fr_va.values, cfg.PROBA_SIGNAL_TH, cfg.COST_BPS)
-
-def split_holdout(df: pd.DataFrame, cfg: TrainConfig):
+def split_holdout(df: pd.DataFrame, cfg: BotConfig):
     n = len(df)
     cut = int(n * (1.0 - cfg.HOLDOUT_PCT))
     return df.iloc[:cut].copy(), df.iloc[cut:].copy()
@@ -227,48 +122,25 @@ def persist_registry(db_path: str, row: dict):
     finally:
         conn.close()
 
-def train_one_ticker(ib: IB, ticker: str, cfg: TrainConfig):
-    df_raw = fetch_and_cache(
-        ib=ib,
-        db_path=cfg.DATA_DB,
-        ticker=ticker,
-        bar_size=cfg.BAR_SIZE,
-        what_to_show=cfg.WHAT_TO_SHOW,
-        use_rth=cfg.USE_RTH,
-    )
-
-    df = add_features(df_raw, cfg.REGIME_ROLL)
-    df = add_label(df, cfg.LABEL_HORIZON_BARS, cfg.LABEL_ATR_K, cfg.MIN_LABEL_PCT)
+def train_one(ib: IB, ticker: str, cfg: BotConfig) -> dict:
+    bars = refresh_cache(ib, cfg.DATA_DB, ticker, cfg.BAR_SIZE, cfg.WHAT_TO_SHOW, cfg.USE_RTH)
+    df = make_labeled_frame(bars, cfg)
     df.dropna(inplace=True)
 
-    # Avoid label leakage at tail
+    # avoid label leakage tail
     df = df.iloc[:-cfg.LABEL_HORIZON_BARS].copy()
 
-    # Features
+    # exclude target + price/volume columns that are not model inputs
     exclude = {"direction","Open","High","Low","Close","Volume"}
     features = [c for c in df.columns if c not in exclude]
 
-    # Split holdout
     df_train, df_hold = split_holdout(df, cfg)
 
     X = df_train[features]
     y = df_train["direction"]
     fr = df_train["fwd_ret"]
+    idx = df_train.index
 
-    folds = timestamp_folds(
-        df_train,
-        train_min_bars=cfg.CV_TRAIN_MIN_BARS,
-        val_len_days=cfg.CV_VAL_LEN_DAYS,
-        gap_days=cfg.CV_GAP_DAYS,
-        n_folds=cfg.CV_N_FOLDS,
-        mode=cfg.CV_MODE,
-        rolling_train_months=cfg.CV_ROLLING_TRAIN_MONTHS,
-    )
-
-    if not folds:
-        raise ValueError("Insufficient data to construct timestamp CV folds")
-
-    # Tune
     if cfg.FAST_MODE:
         best_params = {
             "n_estimators": 650,
@@ -288,13 +160,8 @@ def train_one_ticker(ib: IB, ticker: str, cfg: TrainConfig):
         }
         tuned_score = None
     else:
-        sampler = TPESampler(seed=42)
-        study = optuna.create_study(direction="maximize", sampler=sampler)
-        study.optimize(
-            lambda t: optuna_objective(t, X, y, fr, folds, cfg),
-            n_trials=cfg.N_TRIALS,
-            show_progress_bar=False,
-        )
+        study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=42))
+        study.optimize(lambda t: optuna_objective(t, X, y, fr, idx, cfg), n_trials=cfg.N_TRIALS, show_progress_bar=False)
         best_params = dict(study.best_params)
         best_params.update({
             "random_state": 42,
@@ -304,76 +171,50 @@ def train_one_ticker(ib: IB, ticker: str, cfg: TrainConfig):
         })
         tuned_score = float(study.best_value)
 
-    # Baseline model for SHAP prune
     base = make_xgb_classifier(best_params)
     base.fit(X, y, verbose=False)
     pruned = shap_select_features(base, X, cfg.SHAP_TOP_K)
 
-    # Final model training on pruned features
     Xp = df_train[pruned]
     yp = df_train["direction"]
     frp = df_train["fwd_ret"]
 
-    final_model = make_xgb_classifier(best_params)
-    final_model.fit(Xp, yp, verbose=False)
+    final = make_xgb_classifier(best_params)
+    final.fit(Xp, yp, verbose=False)
 
-    # Holdout evaluation (headline)
     hold_metrics = {}
     if len(df_hold) > 50:
         Xh = df_hold[pruned]
         yh = df_hold["direction"]
         frh = df_hold["fwd_ret"]
-        proba = final_model.predict_proba(Xh)[:, 1]
+        proba = final.predict_proba(Xh)[:, 1]
         hold_metrics = trading_metrics(yh.values, proba, frh.values, cfg.PROBA_SIGNAL_TH, cfg.COST_BPS)
 
-    # WFO evaluation (fixed best params; no re-tune per window by default)
-    wfo_rows = []
-    for (tr_s, tr_e, va_s, va_e) in wfo_splits(df_train, cfg):
-        dtr = df_train.loc[(df_train.index >= tr_s) & (df_train.index < tr_e)]
-        dva = df_train.loc[(df_train.index >= va_s) & (df_train.index < va_e)]
-        if len(dtr) < 300 or len(dva) < 50:
-            continue
-
-        X_tr = dtr[pruned]; y_tr = dtr["direction"]; fr_tr = dtr["fwd_ret"]
-        X_va = dva[pruned]; y_va = dva["direction"]; fr_va = dva["fwd_ret"]
-
-        tm = evaluate_window(X_tr, y_tr, fr_tr, X_va, y_va, fr_va, best_params, cfg)
-        tm.update({
-            "train_start": tr_s.isoformat(),
-            "train_end": tr_e.isoformat(),
-            "val_start": va_s.isoformat(),
-            "val_end": va_e.isoformat(),
-        })
-        wfo_rows.append(tm)
-
-    wfo_summary = {}
-    if wfo_rows:
-        dfw = pd.DataFrame(wfo_rows)
-        wfo_summary = {
-            "windows": len(dfw),
-            "median_expectancy_net": float(np.nanmedian(dfw["expectancy_net"])),
-            "median_pf_net": float(np.nanmedian(dfw["profit_factor_net"])),
-            "median_precision": float(np.nanmedian(dfw["precision"])),
-            "median_signals": float(np.nanmedian(dfw["signals"])),
-        }
-
-    # Schema persistence
+    # Persist artifacts
     os.makedirs(cfg.MODEL_DIR, exist_ok=True)
     version = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     model_path = os.path.join(cfg.MODEL_DIR, f"{ticker}_{cfg.BAR_SIZE.replace(' ','')}_{version}.json")
     feats_path = os.path.join(cfg.MODEL_DIR, f"{ticker}_features.txt")
     meta_path = os.path.join(cfg.MODEL_DIR, f"{ticker}_meta.json")
 
-    final_model.save_model(model_path)
-
-    chk = features_checksum(pruned)
+    final.save_model(model_path)
     with open(feats_path, "w", encoding="utf-8") as f:
         f.write("\n".join(pruned))
+    chk = features_checksum(pruned)
+
+    cv_scheme = {
+        "type": "timestamp_folds",
+        "val_days": cfg.CV_VAL_DAYS,
+        "gap_days": cfg.CV_GAP_DAYS,
+        "min_train_bars": cfg.CV_MIN_TRAIN_BARS,
+        "mode": cfg.CV_MODE,
+        "rolling_train_months": cfg.CV_ROLLING_TRAIN_MONTHS,
+    }
 
     meta = {
         "ticker": ticker,
         "model_version": version,
-        "trained_at_utc": datetime.now(timezone.utc).isoformat(),
+        "trained_at_utc": utc_now_iso(),
         "bar_size": cfg.BAR_SIZE,
         "label": {
             "horizon_hours": cfg.LABEL_HORIZON_HOURS,
@@ -381,43 +222,28 @@ def train_one_ticker(ib: IB, ticker: str, cfg: TrainConfig):
             "atr_k": cfg.LABEL_ATR_K,
             "min_label_pct": cfg.MIN_LABEL_PCT,
         },
+        "feature_engineering": {
+            "regime_roll": cfg.REGIME_ROLL,
+            "supertrend_period": cfg.SUPERTREND_PERIOD,
+            "supertrend_multiplier": cfg.SUPERTREND_MULTIPLIER,
+        },
         "objective": {
-            "primary": "median(avg_fwd_ret_on_signals_net) - 0.5*IQR",
+            "proba_signal_th": cfg.PROBA_SIGNAL_TH,
             "min_signals": cfg.MIN_SIGNALS,
             "min_precision": cfg.MIN_PRECISION,
-            "proba_signal_th": cfg.PROBA_SIGNAL_TH,
             "cost_bps": cfg.COST_BPS,
         },
-        "cv": {
-            "cv_scheme": "timestamp_folds",
-            "gap_days": cfg.CV_GAP_DAYS,
-            "val_len_days": cfg.CV_VAL_LEN_DAYS,
-            "mode": cfg.CV_MODE,
-            "n_folds_effective": len(folds),
-            "folds": [
-                {
-                    "train_start": f["train_start"].isoformat(),
-                    "train_end": f["train_end"].isoformat(),
-                    "gap_start": f["gap_start"].isoformat(),
-                    "gap_end": f["gap_end"].isoformat(),
-                    "val_start": f["val_start"].isoformat(),
-                    "val_end": f["val_end"].isoformat(),
-                }
-                for f in folds
-            ],
-        },
+        "cv_scheme": cv_scheme,
         "best_params": best_params,
         "tuned_score": tuned_score,
         "features_checksum": chk,
         "features_count": len(pruned),
         "holdout_metrics": hold_metrics,
-        "wfo_summary": wfo_summary,
     }
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    # Registry row
-    row = {
+    persist_registry(cfg.DATA_DB, {
         "ticker": ticker,
         "model_version": version,
         "trained_at_utc": meta["trained_at_utc"],
@@ -430,38 +256,25 @@ def train_one_ticker(ib: IB, ticker: str, cfg: TrainConfig):
         "features_checksum": chk,
         "features_count": len(pruned),
         "holdout_metrics_json": json.dumps(hold_metrics),
-        "wfo_metrics_json": json.dumps(wfo_summary),
-    }
-    persist_registry(cfg.DATA_DB, row)
+        "wfo_metrics_json": json.dumps({}),
+        "cv_scheme_json": json.dumps(cv_scheme),
+    })
 
-    return {
-        "ticker": ticker,
-        "model_path": model_path,
-        "features_count": len(pruned),
-        "holdout": hold_metrics,
-        "wfo": wfo_summary,
-    }
+    return {"ticker": ticker, "model_path": model_path, "features": len(pruned), "holdout": hold_metrics}
 
 def main():
-    cfg = TrainConfig()
+    cfg = BotConfig()
     ensure_schema(cfg.DATA_DB)
 
     ib = IB()
-    ib.connect(cfg.IB_HOST, cfg.IB_PORT, clientId=cfg.IB_CLIENT_ID)
-
-    results = []
+    ib.connect(cfg.IB_HOST, cfg.IB_PORT, clientId=cfg.IB_CLIENT_ID_TRAIN)
     try:
         for t in cfg.TICKERS:
-            print(f"\n=== TRAIN {t} ({cfg.BAR_SIZE}) ===")
-            res = train_one_ticker(ib, t, cfg)
-            results.append(res)
-            print(f"{t}: features={res['features_count']} holdout={res['holdout']} wfo={res['wfo']}")
+            print(f"=== TRAIN {t} ===")
+            out = train_one(ib, t, cfg)
+            print(out)
     finally:
         ib.disconnect()
-
-    print("\nDONE")
-    for r in results:
-        print(r)
 
 if __name__ == "__main__":
     main()
