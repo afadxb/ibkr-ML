@@ -107,6 +107,15 @@ def add_features(df: pd.DataFrame, regime_roll: int) -> pd.DataFrame:
     # SuperTrend + regime
     df = supertrend(df, period=14, multiplier=4.0)
 
+    # SuperTrend-derived features
+    df["dist_supertrend"] = df["Close"] / df["supertrend"].replace(0, np.nan) - 1
+    st_flip = (df["st_direction"].diff().fillna(0) != 0).astype(int)
+    df["st_flip"] = st_flip
+    flip_groups = st_flip.cumsum()
+    baseline = flip_groups.where(st_flip == 1).ffill().fillna(0)
+    df["bars_since_st_flip"] = (flip_groups - baseline).astype(int)
+    df["st_slope"] = df["supertrend"].pct_change(periods=5)
+
     # Regime z-scores
     df["atrp_14_z"] = (df["atrp_14"] - df["atrp_14"].rolling(regime_roll).mean()) / df["atrp_14"].rolling(regime_roll).std()
     df["bb_width_20_z"] = (df["bb_width_20"] - df["bb_width_20"].rolling(regime_roll).mean()) / df["bb_width_20"].rolling(regime_roll).std()
