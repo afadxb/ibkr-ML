@@ -4,7 +4,8 @@ import sqlite3
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from ib_insync import IB, Stock, MarketOrder, StopOrder
+from ib_insync import IB, Stock, LimitOrder, StopOrder
+from ibapi.common import UNSET_DOUBLE, UNSET_INTEGER
 
 from config import BotConfig
 from db_schema import ensure_schema
@@ -54,31 +55,31 @@ def _clear_volatility_fields(order):
     fields prevents the API from sending them.
     """
     if hasattr(order, "volatility"):
-        order.volatility = None
+        order.volatility = UNSET_DOUBLE
     if hasattr(order, "volatilityType"):
-        order.volatilityType = None
+        order.volatilityType = UNSET_INTEGER
 
 
-def place_long_trade(ib: IB, ticker: str, qty: int, stop_price: float, cfg: BotConfig):
+def place_long_trade(ib: IB, ticker: str, qty: int, stop_price: float, limit_price: float, cfg: BotConfig):
     contract = Stock(ticker, "SMART", "USD")
     ib.qualifyContracts(contract)
 
     if cfg.PAPER_MODE:
-        paper_msg = f"[PAPER] BUY {ticker} qty={qty} stop={stop_price:.2f}"
+        paper_msg = f"[PAPER] BUY {ticker} qty={qty} limit={limit_price:.2f} stop={stop_price:.2f}"
         print(paper_msg)
         send_pushover("Paper order placed", paper_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
         return
 
     try:
-        mkt = MarketOrder("BUY", qty)
-        _clear_volatility_fields(mkt)
-        ib.placeOrder(contract, mkt)
+        lmt = LimitOrder("BUY", qty, limit_price)
+        _clear_volatility_fields(lmt)
+        ib.placeOrder(contract, lmt)
 
         stp = StopOrder("SELL", qty, stop_price)
         _clear_volatility_fields(stp)
         ib.placeOrder(contract, stp)
 
-        success_msg = f"BUY {ticker} qty={qty} stop={stop_price:.2f} placed"
+        success_msg = f"BUY {ticker} qty={qty} limit={limit_price:.2f} stop={stop_price:.2f} placed"
         print(success_msg)
         send_pushover("Order placed", success_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
     except Exception as exc:
@@ -162,7 +163,7 @@ def main():
                     if qty <= 0:
                         print(f"{t}: qty=0; skip.")
                         continue
-                    place_long_trade(ib, t, qty, stop, cfg)
+                    place_long_trade(ib, t, qty, stop, px, cfg)
 
             time.sleep(cfg.RUN_EVERY_SECONDS)
 
