@@ -3,6 +3,19 @@ from dataclasses import dataclass
 from datetime import timedelta
 import pandas as pd
 
+
+def _align_to_bar(target: pd.Timestamp, idx: pd.DatetimeIndex) -> pd.Timestamp | None:
+    """Snap a timestamp to the most recent bar close in ``idx``.
+
+    Fold boundaries should always align to actual bar timestamps (RTH only),
+    not arbitrary wall-clock days. This helper returns the latest bar close
+    at or before ``target`` or ``None`` if ``target`` precedes the history.
+    """
+    pos = idx.searchsorted(target, side="right")
+    if pos == 0:
+        return None
+    return idx[pos - 1]
+
 @dataclass(frozen=True)
 class Fold:
     train_start: pd.Timestamp
@@ -31,6 +44,13 @@ def timestamp_folds(
     val = timedelta(days=val_days)
     gap = timedelta(days=gap_days)
 
+    # Use historical RTH cadence to require sufficiently dense validation windows
+    bars_per_day = idx.normalize().value_counts()
+    typical_bars_per_day = int(bars_per_day.median()) if not bars_per_day.empty else 0
+    if typical_bars_per_day == 0:
+        return []
+    min_val_bars = max(50, int(typical_bars_per_day * val_days * 0.6))
+
     # choose fold validation ends evenly spaced in the eligible range
     # Eligible latest val_end leaves no future; we let caller keep holdout separate.
     # Here we build folds within the provided index range.
@@ -43,15 +63,21 @@ def timestamp_folds(
 
     for p in positions:
         val_end = idx[p]
-        val_start = val_end - val
+        val_start = _align_to_bar(val_end - val, idx)
         gap_end = val_start
-        gap_start = gap_end - gap
+        gap_start = _align_to_bar(gap_end - gap, idx) if gap_end is not None else None
         train_end = gap_start
 
+        if val_start is None or gap_start is None:
+            continue
+
         if mode == "rolling":
-            train_start = train_end - pd.DateOffset(months=rolling_train_months)
+            train_start = _align_to_bar(train_end - pd.DateOffset(months=rolling_train_months), idx)
         else:
             train_start = start
+
+        if train_start is None:
+            continue
 
         # enforce ordering
         if train_end <= train_start:
@@ -62,7 +88,7 @@ def timestamp_folds(
         val_mask = (idx >= val_start) & (idx < val_end)
         if train_mask.sum() < min_train_bars:
             continue
-        if val_mask.sum() < 50:
+        if val_mask.sum() < min_val_bars:
             continue
 
         folds.append(Fold(
