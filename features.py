@@ -1,41 +1,29 @@
+import sqlite3
 import numpy as np
 import pandas as pd
 
 from config import BotConfig
 
-def true_range(high, low, close):
+def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     tr1 = high - low
     tr2 = (high - close.shift()).abs()
     tr3 = (low - close.shift()).abs()
     return pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-def rsi(series, period):
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = (-delta).clip(lower=0)
-    ma_up = up.rolling(period).mean()
-    ma_down = down.rolling(period).mean()
-    rs = ma_up / ma_down.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
-
-def supertrend(
-    df: pd.DataFrame,
-    period: int = BotConfig.SUPERTREND_PERIOD,
-    multiplier: float = BotConfig.SUPERTREND_MULTIPLIER,
-) -> pd.DataFrame:
+def compute_supertrend(df: pd.DataFrame, atr_len: int, mult: float) -> pd.DataFrame:
     df = df.copy()
-    atr = true_range(df["High"], df["Low"], df["Close"]).rolling(period).mean()
+    atr = true_range(df["High"], df["Low"], df["Close"]).rolling(atr_len).mean()
     hl2 = (df["High"] + df["Low"]) / 2
-    upper = hl2 + (multiplier * atr)
-    lower = hl2 - (multiplier * atr)
+    upper = hl2 + (mult * atr)
+    lower = hl2 - (mult * atr)
 
     st = pd.Series(np.nan, index=df.index)
     direction = pd.Series(1, index=df.index)
 
-    st.iloc[:period] = np.nan
-    direction.iloc[:period] = 1
+    st.iloc[:atr_len] = np.nan
+    direction.iloc[:atr_len] = 1
 
-    for i in range(period, len(df)):
+    for i in range(atr_len, len(df)):
         prev_st = st.iloc[i - 1]
         prev_dir = direction.iloc[i - 1]
         if np.isnan(prev_st):
@@ -51,7 +39,6 @@ def supertrend(
     df["supertrend"] = st
     df["st_direction"] = direction
 
-    # Supertrend-derived features (must be used consistently in training + live)
     df["dist_supertrend"] = df["Close"] / df["supertrend"] - 1
     df["st_flip"] = (df["st_direction"] != df["st_direction"].shift(1)).astype(int)
     df["bars_since_st_flip"] = df["st_flip"].groupby((df["st_flip"] == 1).cumsum()).cumcount()
@@ -59,11 +46,72 @@ def supertrend(
 
     return df
 
+def get_st_params(symbol: str, timeframe: str, db_path: str, fallback: tuple[int, float] = (10, 3.0)):
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT atr_len, mult, score, as_of, run_id
+            FROM st_param_recommendations
+            WHERE symbol=? AND timeframe=?
+            ORDER BY as_of DESC
+            LIMIT 1
+            """,
+            (symbol, timeframe),
+        ).fetchone()
+        if row:
+            meta = {"score": row["score"], "as_of": row["as_of"], "run_id": row["run_id"]}
+            return int(row["atr_len"]), float(row["mult"]), meta
+        return fallback[0], fallback[1], None
+    finally:
+        conn.close()
+
+def apply_supertrend_with_reco(
+    df: pd.DataFrame,
+    symbol: str,
+    timeframe: str,
+    db_path: str,
+    fallback: tuple[int, float] = (10, 3.0),
+    cached_params: dict | tuple | None = None,
+) -> pd.DataFrame:
+    atr_len: int
+    mult: float
+    meta = None
+
+    if cached_params is not None:
+        if isinstance(cached_params, tuple):
+            atr_len, mult, meta = cached_params
+        else:
+            atr_len = cached_params.get("atr_len", fallback[0])
+            mult = cached_params.get("mult", fallback[1])
+            meta = cached_params.get("meta")
+    else:
+        atr_len, mult, meta = get_st_params(symbol, timeframe, db_path, fallback=fallback)
+
+    df_out = compute_supertrend(df, atr_len, mult)
+    df_out.attrs["st_meta"] = meta
+    return df_out
+
+def rsi(series, period):
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = (-delta).clip(lower=0)
+    ma_up = up.rolling(period).mean()
+    ma_down = down.rolling(period).mean()
+    rs = ma_up / ma_down.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
 def add_features(
     df: pd.DataFrame,
     regime_roll: int,
     st_period: int = BotConfig.SUPERTREND_PERIOD,
     st_multiplier: float = BotConfig.SUPERTREND_MULTIPLIER,
+    *,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    db_path: str | None = None,
+    st_params: dict | tuple | None = None,
 ) -> pd.DataFrame:
     df = df.copy()
 
@@ -127,7 +175,18 @@ def add_features(
     df["dow"] = df.index.dayofweek
 
     # Supertrend + derived features (single source of truth)
-    df = supertrend(df, period=st_period, multiplier=st_multiplier)
+    fallback = (st_period, st_multiplier)
+    if symbol and timeframe and db_path:
+        df = apply_supertrend_with_reco(
+            df,
+            symbol=symbol,
+            timeframe=timeframe,
+            db_path=db_path,
+            fallback=fallback,
+            cached_params=st_params,
+        )
+    else:
+        df = compute_supertrend(df, st_period, st_multiplier)
 
     # Regime
     df["atrp_14_z"] = (df["atrp_14"] - df["atrp_14"].rolling(regime_roll).mean()) / df["atrp_14"].rolling(regime_roll).std()

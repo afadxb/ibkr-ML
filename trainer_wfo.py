@@ -15,6 +15,11 @@ from pipeline import make_labeled_frame
 from metrics import trading_metrics, constrained_fold_score
 from utils import features_checksum, utc_now_iso
 from cv import timestamp_folds
+from supertrend_params import (
+    normalize_timeframe_label,
+    select_supertrend_params,
+    save_st_recommendations,
+)
 
 def compute_spw_baseline(y: pd.Series) -> float:
     pos = float((y == 1).sum())
@@ -124,7 +129,33 @@ def persist_registry(db_path: str, row: dict):
 
 def train_one(ib: IB, ticker: str, cfg: BotConfig) -> dict:
     bars = refresh_cache(ib, cfg.DATA_DB, ticker, cfg.BAR_SIZE, cfg.WHAT_TO_SHOW, cfg.USE_RTH)
-    df = make_labeled_frame(bars, cfg)
+    timeframe = normalize_timeframe_label(cfg.BAR_SIZE)
+    st_row = select_supertrend_params(bars, cost_bps=6.0, timeframe=timeframe, symbol=ticker)
+    st_params: tuple[int, float, dict | None]
+    if st_row:
+        print(f"{ticker}: selected ST params atr_len={st_row.atr_len} mult={st_row.mult} score={st_row.score:.4f}")
+        save_st_recommendations(cfg.DATA_DB, [st_row])
+        st_params = (st_row.atr_len, st_row.mult, {"score": st_row.score, "as_of": st_row.as_of, "run_id": st_row.run_id})
+
+        artifact = {
+            "symbol": st_row.symbol,
+            "timeframe": st_row.timeframe,
+            "atr_len": st_row.atr_len,
+            "mult": st_row.mult,
+            "score": st_row.score,
+            "as_of": st_row.as_of,
+            "run_id": st_row.run_id,
+        }
+        os.makedirs(cfg.MODEL_DIR, exist_ok=True)
+        safe_run_id = st_row.run_id.replace(":", "").replace("-", "")
+        art_path = os.path.join(cfg.MODEL_DIR, f"st_params_{timeframe}_{safe_run_id}.json")
+        with open(art_path, "w", encoding="utf-8") as f:
+            json.dump(artifact, f, indent=2)
+    else:
+        print(f"{ticker}: using default ST params atr_len={cfg.SUPERTREND_PERIOD} mult={cfg.SUPERTREND_MULTIPLIER}")
+        st_params = (cfg.SUPERTREND_PERIOD, cfg.SUPERTREND_MULTIPLIER, None)
+
+    df = make_labeled_frame(bars, cfg, symbol=ticker, timeframe=timeframe, st_params=st_params)
     df.dropna(inplace=True)
 
     # avoid label leakage tail

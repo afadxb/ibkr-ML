@@ -80,6 +80,25 @@ CREATE TABLE IF NOT EXISTS predictions_log (
   st_direction INTEGER,
   regime_high_vol INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS st_param_recommendations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  atr_len INTEGER NOT NULL,
+  mult REAL NOT NULL,
+  score REAL NOT NULL,
+  median_e REAL,
+  median_mdd REAL,
+  median_flip_rate REAL,
+  fold_count INTEGER NOT NULL,
+  as_of TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  cost_bps REAL NOT NULL,
+  notes TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS st_param_recommendations_uq ON st_param_recommendations(symbol, timeframe, run_id);
+CREATE INDEX IF NOT EXISTS st_param_recommendations_latest ON st_param_recommendations(symbol, timeframe, as_of DESC);
 """
 
 def ensure_schema(db_path: str) -> None:

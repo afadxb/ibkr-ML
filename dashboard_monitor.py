@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from config import BotConfig
+from supertrend_params import normalize_timeframe_label
 
 cfg = BotConfig()
 
@@ -18,12 +19,25 @@ def load_df(query: str, params=()):
     finally:
         conn.close()
 
+
+@st.cache_data(ttl=60)
+def load_latest_st_params():
+    return load_df(
+        """
+        SELECT * FROM st_param_recommendations
+        WHERE (symbol, timeframe, as_of) IN (
+            SELECT symbol, timeframe, MAX(as_of) FROM st_param_recommendations GROUP BY symbol, timeframe
+        )
+        ORDER BY symbol ASC
+        """
+    )
+
 st.set_page_config(page_title="SteadyAlpha ML Monitoring", layout="wide")
 st.title("SteadyAlpha ML Monitoring (SQLite)")
 
 page = st.sidebar.radio(
     "Page",
-    ["Overview", "Ticker Drilldown", "Predictions", "Drift Center", "Model Registry"],
+    ["Overview", "Ticker Drilldown", "Predictions", "Drift Center", "Model Registry", "Supertrend Params"],
 )
 
 # ---------------- Overview ----------------
@@ -43,6 +57,7 @@ if page == "Overview":
         "SELECT week_start, ticker, flag, ks_stat FROM drift_pred_weekly "
         "WHERE week_start = (SELECT MAX(week_start) FROM drift_pred_weekly)"
     )
+    st_latest = load_latest_st_params()
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Tickers", len(cfg.TICKERS))
@@ -81,6 +96,13 @@ if page == "Overview":
         series = pred7.groupby(["day", "ticker"])["prob_up"].mean().unstack("ticker")
         st.line_chart(series)
 
+    st.subheader("Supertrend params (latest)")
+    if st_latest.empty:
+        st.info("No supertrend recommendations saved yet. Train to populate st_param_recommendations.")
+    else:
+        cols = ["symbol", "timeframe", "atr_len", "mult", "score", "as_of", "run_id"]
+        st.dataframe(st_latest[cols], use_container_width=True)
+
     st.subheader("Weekly KS Drift (latest week)")
     if drift_latest.empty:
         st.info("No drift_pred_weekly rows yet. Run drift_weekly.py.")
@@ -110,6 +132,25 @@ elif page == "Ticker Drilldown":
         c2.metric("Missing Bars %", round(float(top["missing_bars_pct"]), 2))
         c3.metric("Outlier Bars %", round(float(top["outlier_bars_pct"]), 2))
         c4.metric("Notes", str(top.get("notes", ""))[:60])
+
+        tf_label = normalize_timeframe_label(cfg.BAR_SIZE)
+        st_row = load_df(
+            "SELECT atr_len, mult, as_of, run_id, score FROM st_param_recommendations "
+            "WHERE symbol=? AND timeframe=? ORDER BY as_of DESC LIMIT 1",
+            (t, tf_label),
+        )
+
+        st.subheader("Supertrend params (latest)")
+        if st_row.empty:
+            st.info("No params saved yet for this ticker/timeframe.")
+        else:
+            r = st_row.iloc[0]
+            cst1, cst2, cst3, cst4 = st.columns(4)
+            cst1.metric("atr_len", int(r["atr_len"]))
+            cst2.metric("mult", float(r["mult"]))
+            cst3.metric("as_of", str(r["as_of"]))
+            cst4.metric("run_id", str(r["run_id"]))
+            st.markdown(f"Score: **{float(r['score']):.4f}**")
 
         st.subheader("Daily Monitoring Table")
         st.dataframe(daily, use_container_width=True)
@@ -242,7 +283,7 @@ elif page == "Drift Center":
         st.dataframe(pivot.fillna(""), use_container_width=True)
 
 # ---------------- Model Registry ----------------
-else:
+elif page == "Model Registry":
     reg = load_df("SELECT * FROM model_registry ORDER BY trained_at_utc DESC LIMIT 500")
     if reg.empty:
         st.info("No model_registry rows found. Train models first (trainer_wfo.py).")
@@ -258,6 +299,14 @@ else:
 
     if not reg_t.empty:
         row = reg_t.iloc[0]
+        tf_label = normalize_timeframe_label(cfg.BAR_SIZE)
+        st_row = load_df(
+            "SELECT run_id, as_of, atr_len, mult FROM st_param_recommendations WHERE symbol=? AND timeframe=? ORDER BY as_of DESC LIMIT 1",
+            (t, tf_label),
+        )
+        if not st_row.empty:
+            st.metric("ST Params Version", str(st_row.iloc[0]["run_id"]))
+
         st.subheader("Holdout Metrics (latest)")
         try:
             st.json(json.loads(row["holdout_metrics_json"] or "{}"))
@@ -269,3 +318,22 @@ else:
             st.json(json.loads(row["cv_scheme_json"] or "{}"))
         except Exception:
             st.write(row["cv_scheme_json"])
+
+# ---------------- Supertrend Params ----------------
+else:
+    latest = load_df(
+        """
+        SELECT * FROM st_param_recommendations
+        WHERE (symbol, timeframe, as_of) IN (
+            SELECT symbol, timeframe, MAX(as_of) FROM st_param_recommendations GROUP BY symbol, timeframe
+        )
+        ORDER BY symbol ASC
+        """
+    )
+
+    if latest.empty:
+        st.info("No supertrend recommendations saved yet. Run trainer_wfo.py to populate.")
+    else:
+        st.metric("Symbols covered", latest["symbol"].nunique())
+        st.metric("Timeframes", latest["timeframe"].nunique())
+        st.dataframe(latest, use_container_width=True)

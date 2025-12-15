@@ -4,16 +4,18 @@ import sqlite3
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from ib_insync import IB, Stock, util, MarketOrder, StopOrder
+from ib_insync import IB, Stock, MarketOrder, StopOrder
 
 from config import BotConfig
 from db_schema import ensure_schema
 from datahub import refresh_cache
+from features import get_st_params
 from pipeline import make_features
 from modelio import load_bundle, build_inference_row
 from policy import decide
 from execution import initial_stop_from_atr, calc_position_size
 from utils import utc_now_iso, send_pushover, is_regular_trading_time
+from supertrend_params import normalize_timeframe_label
 
 def get_available_funds(ib: IB) -> float:
     acct = ib.accountSummary()
@@ -73,6 +75,24 @@ def main():
     cfg = BotConfig()
     ensure_schema(cfg.DATA_DB)
 
+    timeframe = normalize_timeframe_label(cfg.BAR_SIZE)
+    st_cache = {}
+    for t in cfg.TICKERS:
+        atr_len, mult, meta = get_st_params(
+            t,
+            timeframe,
+            cfg.DATA_DB,
+            fallback=(cfg.SUPERTREND_PERIOD, cfg.SUPERTREND_MULTIPLIER),
+        )
+        st_cache[t] = (atr_len, mult, meta)
+        if meta:
+            print(
+                f"ST params {t} {timeframe}: atr={atr_len} mult={mult} "
+                f"score={meta.get('score'):.4f} as_of={meta.get('as_of')} run_id={meta.get('run_id')}"
+            )
+        else:
+            print(f"ST params {t} {timeframe}: atr={atr_len} mult={mult} (fallback)")
+
     bundles = {t: load_bundle(t, cfg) for t in cfg.TICKERS}
     for t,b in bundles.items():
         print(f"Loaded {t}: version={b['model_version']} model={b['model_path']} feats={len(b['features'])}")
@@ -93,7 +113,13 @@ def main():
                     print(f"{t}: insufficient history ({len(bars)}<{cfg.MIN_HISTORY_BARS}). Skipping.")
                     continue
 
-                df_feat = make_features(bars, cfg).dropna()
+                df_feat = make_features(
+                    bars,
+                    cfg,
+                    symbol=t,
+                    timeframe=timeframe,
+                    st_params=st_cache.get(t),
+                ).dropna()
                 if df_feat.empty:
                     print(f"{t}: features empty after dropna.")
                     continue

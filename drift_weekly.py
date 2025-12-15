@@ -7,9 +7,11 @@ import pandas as pd
 
 from config import BotConfig
 from db_schema import ensure_schema
+from features import get_st_params
 from pipeline import make_features
 from datahub import get_cached_bars
 from modelio import load_bundle
+from supertrend_params import normalize_timeframe_label
 
 def week_start_monday(d: date) -> date:
     return d - timedelta(days=d.weekday())
@@ -72,6 +74,17 @@ def main():
     cfg = BotConfig()
     ensure_schema(cfg.DATA_DB)
 
+    timeframe = normalize_timeframe_label(cfg.BAR_SIZE)
+    st_cache = {
+        t: get_st_params(
+            t,
+            timeframe,
+            cfg.DATA_DB,
+            fallback=(cfg.SUPERTREND_PERIOD, cfg.SUPERTREND_MULTIPLIER),
+        )
+        for t in cfg.TICKERS
+    }
+
     # compute week window
     today = date.today()
     ws = week_start_monday(today)
@@ -91,7 +104,13 @@ def main():
                 continue
 
             # Build features on full history to slice baseline/current
-            df_feat = make_features(bars, cfg).dropna()
+            df_feat = make_features(
+                bars,
+                cfg,
+                symbol=t,
+                timeframe=timeframe,
+                st_params=st_cache.get(t),
+            ).dropna()
             if df_feat.empty:
                 continue
 
