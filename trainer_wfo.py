@@ -105,6 +105,11 @@ def optuna_objective(trial, X, y, fwd_ret, df_index, cfg: BotConfig):
         proba = m.predict_proba(X_va)[:, 1]
 
         tm = trading_metrics(y_va.values, proba, fr_va.values, cfg.PROBA_SIGNAL_TH, cfg.COST_BPS)
+        if tm["signals"] < cfg.MIN_SIGNALS:
+            # Penalize validation windows that are too sparse after RTH-only filtering
+            shortfall = cfg.MIN_SIGNALS - tm["signals"]
+            fold_primary.append(-1.0 - shortfall * 0.05)
+            continue
         fold_primary.append(tm["avg_fwd_ret_on_signals_net"])
 
     primary = np.nanmedian(fold_primary)
