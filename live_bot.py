@@ -4,7 +4,7 @@ import sqlite3
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from ib_insync import IB, Stock, LimitOrder, StopOrder
+from ib_insync import IB, Stock, LimitOrder, StopOrder, Trade
 from ibapi.common import UNSET_DOUBLE, UNSET_INTEGER
 
 from config import BotConfig
@@ -60,6 +60,32 @@ def _clear_volatility_fields(order):
         order.volatilityType = UNSET_INTEGER
 
 
+def _submit_order_with_status(ib: IB, contract: Stock, order, description: str):
+    """Place an order and stream status updates similar to the IBKR example.
+
+    The IBKR Campus "Python placing orders" guide places an order, then polls
+    for updates with ``ib.waitOnUpdate()`` until the trade completes. This
+    helper mirrors that pattern so the live bot logs consistent state changes
+    for both entry and protection orders.
+    """
+    trade: Trade = ib.placeOrder(contract, order)
+    print(f"{description} submitted: status={trade.orderStatus.status}")
+
+    while trade.orderStatus.status not in ("Filled", "Cancelled", "Inactive"):
+        ib.waitOnUpdate()
+        if trade.log:
+            latest = trade.log[-1]
+            print(
+                f"{description} update: status={latest.status} filled={latest.filled} "
+                f"remaining={latest.remaining} avgFill={latest.avgFillPrice}"
+            )
+
+    final_status = trade.orderStatus.status
+    final_fill = trade.orderStatus.avgFillPrice
+    print(f"{description} final: status={final_status} avgFill={final_fill}")
+    return trade
+
+
 def place_long_trade(ib: IB, ticker: str, qty: int, stop_price: float, limit_price: float, cfg: BotConfig):
     contract = Stock(ticker, "SMART", "USD")
     ib.qualifyContracts(contract)
@@ -73,11 +99,11 @@ def place_long_trade(ib: IB, ticker: str, qty: int, stop_price: float, limit_pri
     try:
         lmt = LimitOrder("BUY", qty, limit_price)
         _clear_volatility_fields(lmt)
-        ib.placeOrder(contract, lmt)
+        _submit_order_with_status(ib, contract, lmt, f"BUY {ticker} limit {limit_price:.2f}")
 
         stp = StopOrder("SELL", qty, stop_price)
         _clear_volatility_fields(stp)
-        ib.placeOrder(contract, stp)
+        _submit_order_with_status(ib, contract, stp, f"SELL {ticker} stop {stop_price:.2f}")
 
         success_msg = f"BUY {ticker} qty={qty} limit={limit_price:.2f} stop={stop_price:.2f} placed"
         print(success_msg)
