@@ -47,44 +47,6 @@ def write_prediction(cfg: BotConfig, ticker: str, model_version: str, feats_chk:
     finally:
         conn.close()
 
-def _clear_volatility_fields(order):
-    """Ensure no volatility fields are set for non-VOL orders.
-
-    Some TWS setups propagate volatility defaults to all orders, which causes
-    validation errors for regular MKT/STP orders. Explicitly clearing the
-    fields prevents the API from sending them.
-    """
-    if hasattr(order, "volatility"):
-        order.volatility = UNSET_DOUBLE
-    if hasattr(order, "volatilityType"):
-        order.volatilityType = UNSET_INTEGER
-
-
-def _submit_order_with_status(ib: IB, contract: Stock, order, description: str):
-    """Place an order and stream status updates similar to the IBKR example.
-
-    The IBKR Campus "Python placing orders" guide places an order, then polls
-    for updates with ``ib.waitOnUpdate()`` until the trade completes. This
-    helper mirrors that pattern so the live bot logs consistent state changes
-    for both entry and protection orders.
-    """
-    trade: Trade = ib.placeOrder(contract, order)
-    print(f"{description} submitted: status={trade.orderStatus.status}")
-
-    while trade.orderStatus.status not in ("Filled", "Cancelled", "Inactive"):
-        ib.waitOnUpdate()
-        if trade.log:
-            latest = trade.log[-1]
-            print(
-                f"{description} update: status={latest.status} filled={latest.filled} "
-                f"remaining={latest.remaining} avgFill={latest.avgFillPrice}"
-            )
-
-    final_status = trade.orderStatus.status
-    final_fill = trade.orderStatus.avgFillPrice
-    print(f"{description} final: status={final_status} avgFill={final_fill}")
-    return trade
-
 
 def place_long_trade(ib: IB, ticker: str, qty: int, stop_price: float, limit_price: float, cfg: BotConfig):
     contract = Stock(ticker, "SMART", "USD")
@@ -98,12 +60,10 @@ def place_long_trade(ib: IB, ticker: str, qty: int, stop_price: float, limit_pri
 
     try:
         lmt = LimitOrder("BUY", qty, limit_price)
-        _clear_volatility_fields(lmt)
-        _submit_order_with_status(ib, contract, lmt, f"BUY {ticker} limit {limit_price:.2f}")
+        ib.placeOrder(contract, lmt)
 
         stp = StopOrder("SELL", qty, stop_price)
-        _clear_volatility_fields(stp)
-        _submit_order_with_status(ib, contract, stp, f"SELL {ticker} stop {stop_price:.2f}")
+        ib.placeOrder(contract, stp)
 
         success_msg = f"BUY {ticker} qty={qty} limit={limit_price:.2f} stop={stop_price:.2f} placed"
         print(success_msg)
