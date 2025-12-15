@@ -46,6 +46,19 @@ def write_prediction(cfg: BotConfig, ticker: str, model_version: str, feats_chk:
     finally:
         conn.close()
 
+def _clear_volatility_fields(order):
+    """Ensure no volatility fields are set for non-VOL orders.
+
+    Some TWS setups propagate volatility defaults to all orders, which causes
+    validation errors for regular MKT/STP orders. Explicitly clearing the
+    fields prevents the API from sending them.
+    """
+    if hasattr(order, "volatility"):
+        order.volatility = None
+    if hasattr(order, "volatilityType"):
+        order.volatilityType = None
+
+
 def place_long_trade(ib: IB, ticker: str, qty: int, stop_price: float, cfg: BotConfig):
     contract = Stock(ticker, "SMART", "USD")
     ib.qualifyContracts(contract)
@@ -58,9 +71,11 @@ def place_long_trade(ib: IB, ticker: str, qty: int, stop_price: float, cfg: BotC
 
     try:
         mkt = MarketOrder("BUY", qty)
+        _clear_volatility_fields(mkt)
         ib.placeOrder(contract, mkt)
 
         stp = StopOrder("SELL", qty, stop_price)
+        _clear_volatility_fields(stp)
         ib.placeOrder(contract, stp)
 
         success_msg = f"BUY {ticker} qty={qty} stop={stop_price:.2f} placed"
