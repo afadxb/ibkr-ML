@@ -4,9 +4,9 @@ import sqlite3
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from ib_insync import IB, Stock, LimitOrder, StopOrder, Trade
-from ibapi.common import UNSET_DOUBLE, UNSET_INTEGER
+from ib_insync import IB, Stock
 from ibapi.contract import Contract, ComboLeg
+from ibapi.order import Order
 from ibapi.tag_value import TagValue
 
 from config import BotConfig
@@ -50,44 +50,14 @@ def write_prediction(cfg: BotConfig, ticker: str, model_version: str, feats_chk:
         conn.close()
 
 
-def place_long_trade(ib: IB, ticker: str, qty: int, stop_price: float, limit_price: float, cfg: BotConfig):
-    contract = Stock(ticker, "SMART", "USD")
-    ib.qualifyContracts(contract)
-
-    if cfg.PAPER_MODE:
-        paper_msg = f"[PAPER] BUY {ticker} qty={qty} limit={limit_price:.2f} stop={stop_price:.2f}"
-        print(paper_msg)
-        send_pushover("Paper order placed", paper_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
-        return
-
-    try:
-        lmt = LimitOrder("BUY", qty, limit_price)
-        ib.placeOrder(contract, lmt)
-
-        stp = StopOrder("SELL", qty, stop_price)
-        ib.placeOrder(contract, stp)
-
-        success_msg = f"BUY {ticker} qty={qty} limit={limit_price:.2f} stop={stop_price:.2f} placed"
-        print(success_msg)
-        send_pushover("Order placed", success_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
-    except Exception as exc:
-        err_msg = f"Order error for {ticker}: {exc}"
-        print(err_msg)
-        send_pushover("Order error", err_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
-
-
-def build_combo_contract(ib: IB, long_symbol: str, short_symbol: str) -> Contract:
+def build_combo_contract(long_leg: Stock, short_leg: Stock) -> Contract:
     """Create a SMART-routed combo contract for a stock pair.
 
     This mirrors IBKR's combo order example by creating a BAG contract with two
     stock legs and enabling NonGuaranteed routing.
     """
-    long_leg = Stock(long_symbol, "SMART", "USD")
-    short_leg = Stock(short_symbol, "SMART", "USD")
-    ib.qualifyContracts(long_leg, short_leg)
-
     combo = Contract()
-    combo.symbol = f"{long_symbol},{short_symbol}"
+    combo.symbol = f"{long_leg.symbol},{short_leg.symbol}"
     combo.secType = "BAG"
     combo.exchange = "SMART"
     combo.currency = "USD"
@@ -108,9 +78,30 @@ def build_combo_contract(ib: IB, long_symbol: str, short_symbol: str) -> Contrac
     return combo
 
 
-def place_combo_trade(ib: IB, long_symbol: str, short_symbol: str, qty: int, limit_price: float, cfg: BotConfig):
-    """Place a simple long/short stock pair trade as a combo order."""
-    combo_contract = build_combo_contract(ib, long_symbol, short_symbol)
+def build_combo_order(order_id: int, qty: int, limit_price: float) -> Order:
+    order = Order()
+    order.orderId = order_id
+    order.action = "BUY"
+    order.orderType = "LMT"
+    order.lmtPrice = limit_price
+    order.totalQuantity = qty
+    order.tif = "GTC"
+    order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
+    return order
+
+
+def place_combo_order(ib: IB, long_symbol: str, short_symbol: str, qty: int, limit_price: float, cfg: BotConfig):
+    """Place a combo order using IBKR's BAG contract pattern.
+
+    This follows the IBKR "Combo Order Snippet" example by:
+    - qualifying both stock legs to fetch their conIds
+    - constructing a BAG contract with two ComboLeg entries
+    - creating a manual limit Order with NonGuaranteed routing
+    - submitting the order via the underlying EClient connection
+    """
+    long_leg = Stock(long_symbol, "SMART", "USD")
+    short_leg = Stock(short_symbol, "SMART", "USD")
+    ib.qualifyContracts(long_leg, short_leg)
 
     if cfg.PAPER_MODE:
         paper_msg = (
@@ -122,9 +113,10 @@ def place_combo_trade(ib: IB, long_symbol: str, short_symbol: str, qty: int, lim
         return
 
     try:
-        order = LimitOrder("BUY", qty, limit_price)
-        order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
-        ib.placeOrder(combo_contract, order)
+        combo_contract = build_combo_contract(long_leg, short_leg)
+        order_id = ib.client.getReqId()
+        order = build_combo_order(order_id, qty, limit_price)
+        ib.client.placeOrder(order_id, combo_contract, order)
 
         success_msg = (
             f"COMBO BUY {long_symbol} / SELL {short_symbol} "
@@ -139,6 +131,12 @@ def place_combo_trade(ib: IB, long_symbol: str, short_symbol: str, qty: int, lim
 
 def main():
     cfg = BotConfig()
+
+    if not cfg.HEDGE_TICKER:
+        raise RuntimeError(
+            "HEDGE_TICKER must be configured for combo execution; single-leg orders are disabled."
+        )
+
     ensure_schema(cfg.DATA_DB)
 
     timeframe = normalize_timeframe_label(cfg.BAR_SIZE)
@@ -214,15 +212,12 @@ def main():
                         print(f"{t}: qty=0; skip.")
                         continue
 
-                    if cfg.HEDGE_TICKER:
-                        hedge_px = get_last_price(ib, cfg.HEDGE_TICKER)
-                        if not np.isfinite(hedge_px):
-                            print(f"{cfg.HEDGE_TICKER}: invalid hedge price; skip combo order.")
-                            continue
-                        combo_limit = px - hedge_px
-                        place_combo_trade(ib, t, cfg.HEDGE_TICKER, qty, combo_limit, cfg)
-                    else:
-                        place_long_trade(ib, t, qty, stop, px, cfg)
+                    hedge_px = get_last_price(ib, cfg.HEDGE_TICKER)
+                    if not np.isfinite(hedge_px):
+                        print(f"{cfg.HEDGE_TICKER}: invalid hedge price; skip combo order.")
+                        continue
+                    combo_limit = px - hedge_px
+                    place_combo_order(ib, t, cfg.HEDGE_TICKER, qty, combo_limit, cfg)
 
             time.sleep(cfg.RUN_EVERY_SECONDS)
 
