@@ -172,7 +172,7 @@ def train_one_ticker(ib: IB, ticker: str, cfg: TrainConfig):
     df = df.iloc[:-cfg.LABEL_HORIZON_BARS].copy()
 
     # Features
-    exclude = {"direction","Open","High","Low","Close","Volume"}
+    exclude = {"direction","label_thr","fwd_ret","Open","High","Low","Close","Volume"}
     features = [c for c in df.columns if c not in exclude]
 
     # Split holdout
@@ -357,3 +357,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
