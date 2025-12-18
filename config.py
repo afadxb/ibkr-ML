@@ -78,7 +78,6 @@ class BotConfig:
     RISK_PER_TRADE: float = 0.10
     ATR_MULT_STOP: float = 2.0
     ALLOC_PER_SYMBOL: float = 0.20
-    HEDGE_TICKER: str | None = None
 
     # Notifications
     PUSHOVER_TOKEN: str = "au52q3ukcwero2qxabcgbwrfpqr5h8"
