@@ -4,8 +4,7 @@ import sqlite3
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from ib_insync import IB, Stock, Order, TagValue
-from ibapi.contract import Contract, ComboLeg
+from ib_insync import IB, Stock, Order
 
 from config import BotConfig
 from db_schema import ensure_schema
@@ -48,96 +47,60 @@ def write_prediction(cfg: BotConfig, ticker: str, model_version: str, feats_chk:
         conn.close()
 
 
-def build_combo_contract(long_leg: Stock, short_leg: Stock) -> Contract:
-    """Create a SMART-routed combo contract for a stock pair.
+def place_order_with_stop(ib: IB, symbol: str, market_price: float, qty: int, stop_price: float, cfg: BotConfig):
+    """Place a single-leg limit buy offset above the market, with a protective stop."""
+    contract = Stock(symbol, "SMART", "USD")
+    qualified = ib.qualifyContracts(contract)
+    contract = qualified[0] if qualified else contract
 
-    This mirrors IBKR's combo order example by creating a BAG contract with two
-    stock legs and enabling NonGuaranteed routing.
-    """
-    combo = Contract()
-    combo.symbol = f"{long_leg.symbol},{short_leg.symbol}"
-    combo.secType = "BAG"
-    combo.exchange = "SMART"
-    combo.currency = "USD"
-
-    leg_buy = ComboLeg()
-    leg_buy.conId = long_leg.conId
-    leg_buy.ratio = 1
-    leg_buy.action = "BUY"
-    leg_buy.exchange = "SMART"
-
-    leg_sell = ComboLeg()
-    leg_sell.conId = short_leg.conId
-    leg_sell.ratio = 1
-    leg_sell.action = "SELL"
-    leg_sell.exchange = "SMART"
-
-    combo.comboLegs = [leg_buy, leg_sell]
-    return combo
-
-
-def build_combo_order(order_id: int, qty: int, limit_price: float) -> Order:
-    order = Order()
-    order.orderId = order_id
-    order.action = "BUY"
-    order.orderType = "LMT"
-    order.lmtPrice = limit_price
-    order.totalQuantity = qty
-    order.tif = "GTC"
-    # Some IB gateway builds expect the "duration" field to exist even for
-    # non-algo limit orders. Initialize it to an empty string to avoid
-    # AttributeError during serialization.
-    order.duration = ""
-    order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
-    return order
-
-
-def place_combo_order(ib: IB, long_symbol: str, short_symbol: str, qty: int, limit_price: float, cfg: BotConfig):
-    """Place a combo order using IBKR's BAG contract pattern.
-
-    This follows the IBKR "Combo Order Snippet" example by:
-    - qualifying both stock legs to fetch their conIds
-    - constructing a BAG contract with two ComboLeg entries
-    - creating a manual limit Order with NonGuaranteed routing
-    - submitting the order via the underlying EClient connection
-    """
-    long_leg = Stock(long_symbol, "SMART", "USD")
-    short_leg = Stock(short_symbol, "SMART", "USD")
-    ib.qualifyContracts(long_leg, short_leg)
+    min_tick = getattr(contract, "minTick", None)
+    tick_size = min_tick if min_tick and min_tick > 0 else 0.01
+    limit_price = market_price + (tick_size * 2)
 
     if cfg.PAPER_MODE:
-        paper_msg = (
-            f"[PAPER] COMBO BUY {long_symbol} / SELL {short_symbol} "
-            f"qty={qty} limit_spread={limit_price:.2f}"
-        )
+        paper_msg = f"[PAPER] BUY {symbol} qty={qty} LMT {limit_price:.4f} with stop {stop_price:.4f}"
         print(paper_msg)
         send_pushover("Paper order placed", paper_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
         return
 
+    stop_price = max(0.01, min(stop_price, limit_price - tick_size))
+
     try:
-        combo_contract = build_combo_contract(long_leg, short_leg)
-        order_id = ib.client.getReqId()
-        order = build_combo_order(order_id, qty, limit_price)
-        ib.client.placeOrder(order_id, combo_contract, order)
+        parent_id = ib.client.getReqId()
+        parent = Order()
+        parent.orderId = parent_id
+        parent.action = "BUY"
+        parent.orderType = "LMT"
+        parent.lmtPrice = limit_price
+        parent.totalQuantity = qty
+        parent.tif = "DAY"
+        parent.transmit = False
+
+        stop_order = Order()
+        stop_order.orderId = parent_id + 1
+        stop_order.action = "SELL"
+        stop_order.orderType = "STP"
+        stop_order.auxPrice = stop_price
+        stop_order.totalQuantity = qty
+        stop_order.tif = "GTC"
+        stop_order.parentId = parent_id
+        stop_order.transmit = True
+
+        ib.client.placeOrder(parent.orderId, contract, parent)
+        ib.client.placeOrder(stop_order.orderId, contract, stop_order)
 
         success_msg = (
-            f"COMBO BUY {long_symbol} / SELL {short_symbol} "
-            f"qty={qty} limit_spread={limit_price:.2f} placed"
+            f"BUY {symbol} qty={qty} LMT {limit_price:.4f} placed with stop {stop_price:.4f}"
         )
         print(success_msg)
         send_pushover("Order placed", success_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
     except Exception as exc:
-        err_msg = f"Combo order error for {long_symbol}/{short_symbol}: {exc}"
+        err_msg = f"Order error for {symbol}: {exc}"
         print(err_msg)
         send_pushover("Order error", err_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
 
 def main():
     cfg = BotConfig()
-
-    if not cfg.HEDGE_TICKER:
-        raise RuntimeError(
-            "HEDGE_TICKER must be configured for combo execution; single-leg orders are disabled."
-        )
 
     ensure_schema(cfg.DATA_DB)
 
@@ -213,13 +176,11 @@ def main():
                     if qty <= 0:
                         print(f"{t}: qty=0; skip.")
                         continue
-
-                    hedge_px = get_last_price(ib, cfg.HEDGE_TICKER)
-                    if not np.isfinite(hedge_px):
-                        print(f"{cfg.HEDGE_TICKER}: invalid hedge price; skip combo order.")
+                    if not np.isfinite(stop):
+                        print(f"{t}: invalid stop; skip.")
                         continue
-                    combo_limit = px - hedge_px
-                    place_combo_order(ib, t, cfg.HEDGE_TICKER, qty, combo_limit, cfg)
+                    stop = max(0.01, stop)
+                    place_order_with_stop(ib, t, px, qty, stop, cfg)
 
             time.sleep(cfg.RUN_EVERY_SECONDS)
 
