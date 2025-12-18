@@ -4,10 +4,8 @@ import sqlite3
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from ib_insync import IB, Stock
+from ib_insync import IB, Stock, Order, TagValue
 from ibapi.contract import Contract, ComboLeg
-from ibapi.order import Order
-from ibapi.tag_value import TagValue
 
 from config import BotConfig
 from db_schema import ensure_schema
@@ -86,6 +84,10 @@ def build_combo_order(order_id: int, qty: int, limit_price: float) -> Order:
     order.lmtPrice = limit_price
     order.totalQuantity = qty
     order.tif = "GTC"
+    # Some IB gateway builds expect the "duration" field to exist even for
+    # non-algo limit orders. Initialize it to an empty string to avoid
+    # AttributeError during serialization.
+    order.duration = ""
     order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
     return order
 
