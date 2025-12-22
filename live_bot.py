@@ -30,6 +30,15 @@ def get_last_price(ib: IB, ticker: str) -> float:
     p = float(t.marketPrice())
     return p if p and p > 0 else float("nan")
 
+def get_open_positions(ib: IB) -> dict:
+    positions = {}
+    for pos in ib.positions():
+        symbol = getattr(pos.contract, "symbol", None)
+        qty = getattr(pos, "position", 0)
+        if symbol and qty:
+            positions[symbol] = qty
+    return positions
+
 def write_prediction(cfg: BotConfig, ticker: str, model_version: str, feats_chk: str,
                      prob_up: float, used_th: float, decision_str: str,
                      st_direction: int | None, regime_high_vol: int | None):
@@ -133,6 +142,7 @@ def main():
     try:
         while True:
             balance = get_available_funds(ib)
+            open_positions = get_open_positions(ib)
 
             for t in cfg.TICKERS:
                 b = bundles[t]
@@ -163,6 +173,10 @@ def main():
                 print(f"{t}: p={prob_up:.3f} th={d['used_threshold']:.2f} gate={d['gate_pass']} -> {d['decision']}")
 
                 if d["decision"] == "BUY":
+                    if t in open_positions:
+                        print(f"{t}: existing position size {open_positions[t]}; skip new entry.")
+                        continue
+
                     if not is_regular_trading_time():
                         print(f"{t}: signal outside RTH; skip execution.")
                         continue
