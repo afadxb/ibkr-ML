@@ -83,7 +83,7 @@ def place_order_with_stop(ib: IB, symbol: str, market_price: float, qty: int, st
         parent.lmtPrice = limit_price
         parent.totalQuantity = qty
         parent.tif = "DAY"
-        parent.transmit = False
+        parent.transmit = True
 
         stop_order = Order()
         stop_order.orderId = parent_id + 1
