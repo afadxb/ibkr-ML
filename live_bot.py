@@ -64,15 +64,21 @@ def place_order_with_stop(ib: IB, symbol: str, market_price: float, qty: int, st
 
     min_tick = getattr(contract, "minTick", None)
     tick_size = min_tick if min_tick and min_tick > 0 else 0.01
-    limit_price = market_price + (tick_size * 2)
+
+    raw_limit_price = market_price + (tick_size * 2)
+    limit_price = round(raw_limit_price / tick_size) * tick_size
+
+    stop_price = max(tick_size, min(stop_price, limit_price - tick_size))
+    stop_price = round(stop_price / tick_size) * tick_size
+
+    limit_price = round(limit_price, 2)
+    stop_price = round(stop_price, 2)
 
     if cfg.PAPER_MODE:
-        paper_msg = f"[PAPER] BUY {symbol} qty={qty} LMT {limit_price:.4f} with stop {stop_price:.4f}"
+        paper_msg = f"[PAPER] BUY {symbol} qty={qty} LMT {limit_price:.2f} with stop {stop_price:.2f}"
         print(paper_msg)
         send_pushover("Paper order placed", paper_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
         return
-
-    stop_price = max(0.01, min(stop_price, limit_price - tick_size))
 
     try:
         parent_id = ib.client.getReqId()
@@ -99,7 +105,7 @@ def place_order_with_stop(ib: IB, symbol: str, market_price: float, qty: int, st
         ib.client.placeOrder(stop_order.orderId, contract, stop_order)
 
         success_msg = (
-            f"BUY {symbol} qty={qty} LMT {limit_price:.4f} placed with stop {stop_price:.4f}"
+            f"BUY {symbol} qty={qty} LMT {limit_price:.2f} placed with stop {stop_price:.2f}"
         )
         print(success_msg)
         send_pushover("Order placed", success_msg, cfg.PUSHOVER_TOKEN, cfg.PUSHOVER_USER)
