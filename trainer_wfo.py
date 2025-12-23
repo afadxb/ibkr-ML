@@ -167,7 +167,7 @@ def train_one(ib: IB, ticker: str, cfg: BotConfig) -> dict:
     df = df.iloc[:-cfg.LABEL_HORIZON_BARS].copy()
 
     # exclude target + price/volume columns that are not model inputs
-    exclude = {"direction","Open","High","Low","Close","Volume"}
+    exclude = {"direction","fwd_ret","label_thr","Open","High","Low","Close","Volume"}
     features = [c for c in df.columns if c not in exclude]
 
     df_train, df_hold = split_holdout(df, cfg)
