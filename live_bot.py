@@ -176,7 +176,11 @@ def main():
                 write_prediction(cfg, t, b["model_version"], b["features_checksum"],
                                  prob_up, d["used_threshold"], d["decision"], d["st_direction"], d["regime_high_vol"])
 
-                print(f"{t}: p={prob_up:.3f} th={d['used_threshold']:.2f} gate={d['gate_pass']} -> {d['decision']}")
+                px = get_last_price(ib, t)
+                print(
+                    f"{utc_now_iso()} {t}: px={px} p={prob_up:.3f} "
+                    f"th={d['used_threshold']:.2f} gate={d['gate_pass']} -> {d['decision']}"
+                )
 
                 if d["decision"] == "BUY":
                     if t in open_positions:
